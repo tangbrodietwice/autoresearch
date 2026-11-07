@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 from contextlib import ExitStack
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 root=Path(__file__).resolve().parents[1]
@@ -58,6 +59,26 @@ with ExitStack() as stack:
     assert post("decision",id=plan["id"],value="保留候选")["decision"]=="保留候选"
     assert json.loads(fetch("/v1/state")[0])["plan"][0]["decision"]=="保留候选"
     print("PASS Web origin: assets, chat → unassigned draft → project → two experiments → decision")
+
+    assert not json.loads(fetch("/v1/state")[0])["integration"]
+    other=post("plan",title="补充 CTR 研究",direction="对照另一组设定",workspace=project["id"])
+    post("start",id=other["id"],budget=1)
+    for _ in range(100):
+        data=json.loads(fetch("/v1/state")[0])
+        item=next(t for t in data["task"] if t["plan"]==other["id"])
+        if item["status"]=="completed": break
+        time.sleep(.1)
+    post("decision",id=other["id"],value="保留候选")
+    payload=dict(workspace=project["id"],revision="a"*40,plans=[plan["id"],other["id"]],
+                 metrics={"low_freq_auc":.68,"overall_auc":.72},summary="合并版本的固定协议评测")
+    combined=post("integration",**payload)
+    assert combined["ordinal"]==1 and len(combined["plans"])==2 and combined["metrics"]==payload["metrics"]
+    for attempt in (payload,{**payload,"revision":"b"*40,"metrics":{"overall_auc":.72}}):
+        try: post("integration",**attempt)
+        except HTTPError as e: assert e.code==400
+        else: raise AssertionError("invalid integration accepted")
+    assert len(json.loads(fetch("/v1/state")[0])["integration"])==1
+    print("PASS Project integration: candidate runs do not affect the trend; combined evaluation is recorded once with both sources")
 
     subprocess.run([sys.executable,"scripts/run-iris.py","--url",web],cwd=root,check=True,stdout=subprocess.DEVNULL)
     result=json.loads(fetch("/v1/state")[0])

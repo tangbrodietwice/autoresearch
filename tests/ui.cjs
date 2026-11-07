@@ -11,13 +11,15 @@ function server(args){
  return new Promise((resolve,reject)=>{p.stdout.once('data',x=>resolve(String(x).trim()));p.once('error',reject);p.once('exit',c=>reject(Error('Server exited: '+c)))});
 }
 (async()=>{
- let browser;
+ let browser, page;
  try{
   const api=await server(['backend/app.py','--state',temp,'--port','0']);
   const web=await server(['frontend/serve.py','--port','0','--backend-port',new URL(api).port]);
-  browser=await chromium.launch();
-  const page=await browser.newPage(), errors=[];
-  page.on('pageerror',e=>errors.push(e.message));
+  browser=await chromium.launch(process.env.TRIPSCI_CHROMIUM ? {executablePath:process.env.TRIPSCI_CHROMIUM}:{});
+  page=await browser.newPage();
+  const errors=[];
+  page.setDefaultTimeout(10000);
+  page.on('pageerror',e=>{errors.push(e.message);console.error('Page error:',e.message)});
   await page.goto(web);
   await page.getByRole('button',{name:'使用示例'}).click();
   await page.getByLabel('项目名称').fill('UI 测试项目');
@@ -35,10 +37,51 @@ function server(args){
   await page.getByRole('button',{name:'启动模拟研究'}).click();
   await page.getByRole('button',{name:'保留候选'}).click({timeout:15000});
   await page.getByText('结论：保留候选').waitFor();
+  await page.getByRole('button',{name:'项目',exact:true}).click();
+  await page.getByRole('img',{name:/趋势，暂无合并评测/}).waitFor();
+  await page.getByText('平滑强度',{exact:false}).first().waitFor();
+  await page.getByRole('button',{name:'记录合并评测'}).click();
+  await page.locator('input[name=sourcePlan]').check();
+  await page.getByLabel('合并后的 Git 提交哈希').fill('a'.repeat(40));
+  await page.getByLabel('低频 AUC',{exact:true}).fill('0.68');
+  await page.getByLabel('整体 AUC',{exact:true}).fill('0.72');
+  await page.getByLabel('变更与评测摘要').fill('合并后重新评测');
+  await page.getByRole('button',{name:'保存评测'}).click();
+  await page.getByRole('img',{name:'项目 低频 AUC 趋势',exact:true}).waitFor();
+  assert.equal(await page.locator('.chart circle').count(),1);
+  await page.getByRole('button',{name:'研究计划',exact:true}).click();
+  await page.locator('summary[aria-label="切换研究计划"]').click();
+  await page.getByRole('searchbox',{name:'搜索研究计划'}).fill('不匹配的标题');
+  await page.getByText('没有匹配结果。').waitFor();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button',{name:'工具',exact:true}).click();
+  await page.getByRole('button',{name:/Iris 实验启动器/}).click();
+  await page.getByRole('heading',{name:'Iris 实验启动器'}).waitFor();
+  await page.getByRole('button',{name:'智能体',exact:true}).click();
+  await page.getByRole('button',{name:/研究 Worker/}).click();
+  await page.getByRole('button',{name:'指令',exact:true}).click();
+  await page.getByRole('heading',{name:'AGENTS.md'}).waitFor();
+  await page.getByRole('button',{name:'Skills',exact:true}).click();
+  await page.getByRole('heading',{name:'已分配 Skills'}).waitFor();
   await page.reload();
   await page.getByRole('heading',{name:'UI 测试项目'}).waitFor();
+  await page.getByRole('button',{name:'导入 Iris 任务',exact:true}).click();
+  await page.getByRole('heading',{name:'改进 Iris 分类器',exact:true}).waitFor();
+  await page.locator('summary[aria-label="切换研究计划"]').click();
+  await page.locator('.switch-rows button').filter({hasText:'讨论低频 CTR'}).click();
+  await page.getByRole('heading',{name:'讨论低频 CTR',exact:true}).waitFor();
+  await page.getByRole('button',{name:'项目',exact:true}).click();
+  await page.getByRole('heading',{name:'Iris 鸢尾花分类',exact:true}).waitFor();
+  await page.getByRole('img',{name:/趋势，暂无合并评测/}).waitFor();
+  await page.locator('summary[aria-label="切换项目"]').click();
+  await page.locator('.switch-rows button').filter({hasText:'UI 测试项目'}).click();
+  await page.getByRole('img',{name:'项目 低频 AUC 趋势',exact:true}).waitFor();
+  assert.equal(await page.locator('.chart circle').count(),1);
   assert.deepEqual(errors,[]);
-  console.log('PASS Chromium: project, chat, draft, attach, training, decision and reload');
+  console.log('PASS Chromium: project and plan switching, discussion, integration chart, tools, and agent details');
+ }catch(e){
+  if(page)console.error((await page.locator('body').innerText()).slice(0,1600));
+  throw e;
  }finally{
   if(browser)await browser.close();
   for(const p of children)p.kill();

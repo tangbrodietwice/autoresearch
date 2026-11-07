@@ -1,5 +1,6 @@
 """Versioned application operations shared by the native client and tests."""
 import copy
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,7 +41,7 @@ class WorkspaceAPI:
         return row
 
     def state(self, db):
-        data = {k: self.p.all(db, k) for k in ("workspace", "plan", "thread", "agent", "task", "job", "experiment", "progress", "inbox", "tool", "skill")}
+        data = {k: self.p.all(db, k) for k in ("workspace", "plan", "thread", "agent", "task", "job", "experiment", "progress", "inbox", "tool", "skill", "integration")}
         if not any(x["id"]=="worker" for x in data["agent"]):
             data["agent"].insert(0,{"id":"worker", "name":"研究 Worker", "runtime":"local-process",
                               "instructions":"比较模拟 CTR 平滑策略；遵守计划护栏。", "skills":["adaptive-ctr"], "version":1})
@@ -59,6 +60,32 @@ class WorkspaceAPI:
         op = d.get("op")
         uid = lambda: uuid.uuid4().hex[:12]
         s = lambda key, default="", required=False: self.string(d,key,default,required)
+        if op == "integration":
+            env = self.get(db, "workspace", s("workspace", required=True))
+            plans = d.get("plans")
+            if not isinstance(plans, list) or not plans or any(not isinstance(k, str) for k in plans):
+                raise ValueError("请选择成果来源研究计划。")
+            sources = []
+            for key in dict.fromkeys(plans):
+                plan = self.get(db, "plan", key)
+                if plan["workspace"] != env["id"] or plan.get("decision") != "保留候选":
+                    raise ValueError("只能记录此项目已保留候选的研究计划。")
+                task = self.get(db, "task", plan["task"])
+                sources.append({"id": key, "title": plan["title"], "revision": task["best"]["revision"]})
+            revision = s("revision", required=True).lower()
+            if not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", revision):
+                raise ValueError("请输入合并后的完整 Git 提交哈希。")
+            prior = [r for r in self.p.all(db, "integration") if r["workspace"] == env["id"]]
+            if any(r["revision"] == revision for r in prior):
+                raise ValueError("这个项目提交已经记录。")
+            keys = ("macro_f1", "accuracy") if env.get("adapter") == "iris" else ("low_freq_auc", "overall_auc")
+            metrics = d.get("metrics", {})
+            if not isinstance(metrics, dict) or any(type(metrics.get(k)) not in (int, float) or not 0 <= metrics[k] <= 1 for k in keys):
+                raise ValueError("请提供 0 到 1 之间的完整项目评测指标。")
+            return self.put(db, "integration", dict(id=uid(), workspace=env["id"], revision=revision,
+                            dataset=env["dataset"], evaluate=env["evaluate"], adapter=env["adapter"],
+                            ordinal=max((r["ordinal"] for r in prior), default=0)+1, plans=sources,
+                            metrics={k: metrics[k] for k in keys}, summary=s("summary", required=True)))
         if op == "import_iris":
             existing=next((x for x in self.p.all(db,"workspace") if x.get("adapter")=="iris"),None)
             if existing:

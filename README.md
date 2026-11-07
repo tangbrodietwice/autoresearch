@@ -16,6 +16,10 @@ Validation: `python3 tests/web_smoke.py` exercises the Web origin and real backe
 - **工具**：可以登记链接、命令参考和 Markdown Skill。命令参考只记录，不执行；内置 Iris 工具可以直接导入样例。
 - **智能体**：自动识别本机 Codex 和 Claude Code 等受支持的运行时。可分别配置 AGENTS.md 和 Skills。外部运行时暂不可执行；内置 Worker 可运行模拟实验及 Iris 的真实训练。自定义 Markdown 和 Skill 会保存和快照，目前只有内置规则影响实验策略。
 
+### 项目指标趋势
+
+项目主图按合并后的项目版本绘制。研究计划的候选试验显示在「近期实验」里；它们不会单独推动项目主图。合并并评测后，从项目看板记录最终 Git 提交、来源计划与实际指标。当前由工作台记录评测，Git 合并和项目级复评在外部完成。不同数据版本或评测入口的结果保留在历史记录中，不连接到当前曲线。
+
 ### 复现实验
 
 服务运行后执行 `python3 scripts/run-iris.py --url http://127.0.0.1:8766`。脚本使用 TripSci API 导入并启动计划，由 Worker 训练和评估六组候选，最终记录保留或采用的决定。Iris 来自 [UCI](https://archive.ics.uci.edu/dataset/53/iris)。该示例无需 GPU；配置里的混合/远端模式仍由 Mock Adapter 执行。
