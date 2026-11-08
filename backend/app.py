@@ -1,6 +1,8 @@
 import argparse
 import contextlib
 import hashlib
+import fcntl
+import math
 import json
 import re
 from pathlib import Path
@@ -41,22 +43,23 @@ class Project:
             return
         self.repo.mkdir(parents=True, exist_ok=True)
         self.git("init", "-q")
-        for name, value in {
+        files = {
             "data/synthetic-v1.json": [{"user": i, "frequency": 1+i%5, "click": i%3 == 0} for i in range(30)],
             "evaluation/protocol.json": CONSTRAINTS,
             "history.json": [{"name": "baseline", **SEED},
                              {"name": "historical heavy smoothing", "low_freq_auc": .646, "overall_auc": .719}],
-        }.items():
+        }
+        for name, value in files.items():
             if not (self.repo / name).exists():
                 self.write(name, value)
         if not self.git("rev-list", "--all", "--max-count=1"):
-            self.commit("Bootstrap synthetic CTR project")
+            self.commit("Bootstrap synthetic CTR project", *files)
 
     @contextlib.contextmanager
-    def tx(self):
+    def tx(self, readonly=False):
         db = sqlite3.connect(self.root / "state.sqlite", timeout=15)
         try:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute("BEGIN" if readonly else "BEGIN IMMEDIATE")
             with db:
                 yield db
         finally:
@@ -73,11 +76,24 @@ class Project:
         return subprocess.check_output(["git", "-C", str(self.repo), "-c", "user.name=Research Worker",
                                         "-c", "user.email=worker@localhost", *args], text=True).strip()
 
-    def commit(self, label):
-        self.git("add", "-A")
-        if self.git("diff", "--cached", "--name-only"):
-            self.git("commit", "-qm", label)
-        return self.git("rev-parse", "HEAD")
+    def commit(self, label, *paths):
+        if not paths:
+            raise ValueError("Artifact commit requires explicit paths")
+        self.git("add", "--", *paths)
+        if self.git("diff", "--cached", "--name-only", "--", *paths):
+            self.git("commit", "--only", "-qm", label, "--", *paths)
+            return self.git("rev-parse", "HEAD")
+        expected = [self.git("hash-object", "--", path) for path in paths]
+        for revision in self.git("log", "--format=%H", "--fixed-strings", "--grep="+label, "--", *paths).splitlines():
+            if self.git("show", "-s", "--format=%s", revision) != label:
+                continue
+            try:
+                blobs = [self.git("rev-parse", revision+":"+path) for path in paths]
+            except subprocess.CalledProcessError:
+                continue
+            if blobs == expected:
+                return revision
+        raise RuntimeError(f"Cannot recover artifact revision for {label}")
 
     @staticmethod
     def put(db, kind, key, value):
@@ -118,7 +134,7 @@ class TaskManager:
 
     def create(self, db, goal, budget, cap=10):
         if not isinstance(goal, str) or not goal.strip() or len(goal)>500 or type(budget) is not int or not 1<=budget<=cap:
-            raise ValueError("Provide a goal and an experiment valid experiment budget.")
+            raise ValueError("Provide a goal and a valid experiment budget.")
         key = uuid.uuid4().hex[:12]
         task = {"id": key, "goal": goal.strip(), "max_experiments": budget,
                 "constraints": dict(CONSTRAINTS), "settings": self.p.get(db, "settings", "active"),
@@ -146,6 +162,90 @@ class TaskManager:
             task["status"] = "waiting" if task["pending_job"] else "ready"
         self.save(db, task, f"Inbox: {message}")
 
+    max_training_attempts = 3
+    training_timeout = beans.TRAINING_TIMEOUT
+    training_retry_delay = 1
+
+    def training_failure(self, db, task, job, attempt, code, now, detail=None):
+        attempt.update(state="failed", ended_at=now, error_code=code)
+        if detail is not None:
+            attempt["detail"] = detail
+        count = len(job["attempts"]) - job.get("retry_from", 0)
+        terminal = count >= self.max_training_attempts
+        if terminal:
+            reason = {"training_error":"训练返回错误","invalid_receipt":"结果文件无效",
+                      "missing_receipt":"训练退出但未写入结果","timeout":"训练超时",
+                      "launch_failed":"无法启动训练进程"}[code]
+            task.update(status="failed", phase="failed", failure_stage="training",
+                        failure=f"本机训练失败：{reason}（已尝试 {count} 次）",
+                        failure_info=dict(attempt))
+        else:
+            job["retry_at"] = now + self.training_retry_delay * 2**(count-1)
+            task["phase"] = "training_retry"
+        self.p.put(db, "job", job["id"], job)
+        self.save(db, task, f"Training attempt {attempt['number']}: {code}")
+
+    def training_result(self, db, task, job, runtime, now, launches):
+        attempts = job.setdefault("attempts", [])
+        if not attempts and "retry_from" not in job:
+            attempts.append({"number":0,"state":"running","started_at":now})
+        attempt = attempts[-1] if attempts else None
+        if attempt and attempt["state"] == "running":
+            number = attempt["number"]
+            directory = beans.attempt_dir(self.p.root,job["id"],number)
+            receipt = directory/"result.json"
+            if receipt.exists():
+                try:
+                    payload = json.loads(receipt.read_text())
+                    if not isinstance(payload,dict):
+                        raise ValueError("Receipt must be an object")
+                    if payload.get("error"):
+                        self.training_failure(db,task,job,attempt,"training_error",now,str(payload["error"])[:80])
+                        return None
+                    metrics = payload["metrics"]
+                    keys = {task["constraints"]["primary_metric"], task["constraints"]["guardrail_metric"]}
+                    if not all(type(metrics[k]) in (int,float) and math.isfinite(metrics[k]) and 0<=metrics[k]<=1 for k in keys):
+                        raise ValueError("Invalid metric")
+                    started, ended = payload["started_at"],payload["ended_at"]
+                    if not all(type(v) in (int,float) and math.isfinite(v) for v in (started,ended)) or started>ended:
+                        raise ValueError("Invalid timing")
+                except (OSError, ValueError, TypeError, KeyError):
+                    self.training_failure(db,task,job,attempt,"invalid_receipt",now)
+                    return None
+                if now < job["ready_at"]:
+                    return None
+                attempt.update(state="succeeded",ended_at=ended)
+                job.update(training_started_at=started,training_ended_at=ended)
+                return metrics
+            exit_code = runtime.training_exit(job["id"],number)
+            if exit_code is not None:
+                self.training_failure(db,task,job,attempt,"missing_receipt",now,exit_code)
+                return None
+            if now-attempt["started_at"] >= self.training_timeout:
+                runtime.stop_training(job["id"],number)
+                self.training_failure(db,task,job,attempt,"timeout",now)
+                return None
+            locked = runtime.training_locked(directory)
+            if number != 0:
+                if not locked and not runtime.owns_training(job["id"],number) and now-attempt["started_at"] >= 2:
+                    self.training_failure(db,task,job,attempt,"missing_receipt",now)
+                return None
+            if locked:
+                self.p.put(db,"job",job["id"],job)
+                return None
+            # Old jobs had no durable launch record. Reuse a receipt or a held lock if present.
+            attempts.pop()
+        if now < job.get("retry_at",0):
+            return None
+        number = attempts[-1]["number"]+1 if attempts else 1
+        attempt = {"number":number,"state":"running","started_at":now,
+                   "log":str(beans.attempt_dir(self.p.root,job["id"],number).relative_to(self.p.root)/"worker.log")}
+        attempts.append(attempt)
+        task["phase"] = "waiting"
+        self.p.put(db,"job",job["id"],job)
+        launches.append((task["id"],task["workspace"],job["id"],job["adapter"],number))
+        return None
+
     def tick(self, runtime):
         ready, launches = [], []
         now = time.time()
@@ -153,22 +253,12 @@ class TaskManager:
             for task in self.p.all(db, "task"):
                 if task["status"] in ("waiting","paused") and task.get("pending_job"):
                     job = self.p.get(db, "job", task["pending_job"])
-                    if job.get("adapter") in ("beans","name-llm"):
-                        receipt = self.p.root / "training" / job["id"] / "result.json"
-                        if not receipt.exists():
-                            launches.append((task["workspace"],job["id"],job["adapter"]))
-                            continue
-                        payload = json.loads(receipt.read_text())
-                        if payload.get("error"):
-                            task.update(status="failed",phase="failed",failure="本机训练失败："+payload["error"])
-                            self.save(db,task,"Local training failed")
-                            continue
-                        if now < job["ready_at"]:
-                            continue
-                        job.update(training_started_at=payload["started_at"],training_ended_at=payload["ended_at"])
-                        result = payload["metrics"]
-                    else:
-                        result = job.get("result") or MockTraining.poll(job, now)
+                    result = job.get("result")
+                    if result is None:
+                        if job.get("adapter") in ("beans","name-llm"):
+                            result = self.training_result(db,task,job,runtime,now,launches)
+                        else:
+                            result = MockTraining.poll(job,now)
                     if result is not None and ("result" not in job or task["status"]=="waiting"):
                         job["result"] = result
                         self.p.put(db, "job", job["id"], job)
@@ -177,8 +267,14 @@ class TaskManager:
                         self.save(db, task, "Training result available")
                 if task["status"] == "ready" and (task.get("pending_job") or now >= task.get("not_before",0)):
                     ready.append((task.get("last_dispatched",0),task["id"]))
-        for workspace, job_id, adapter in launches:
-            runtime.launch_training(workspace,job_id,adapter)
+        for key, workspace, job_id, adapter, number in launches:
+            try:
+                runtime.launch_training(workspace,job_id,adapter,number)
+            except OSError as exc:
+                with self.p.tx() as db:
+                    task = self.p.get(db,"task",key)
+                    job = self.p.get(db,"job",job_id)
+                    self.training_failure(db,task,job,job["attempts"][-1],"launch_failed",time.time(),exc.errno)
         for _, key in sorted(ready):
             with self.p.tx() as db:
                 task = self.p.get(db, "task", key)
@@ -193,7 +289,7 @@ class TaskManager:
                 with self.p.tx() as db:
                     task = self.p.get(db, "task", key)
                     if task["status"] == "ready":
-                        task.update(status="failed", phase="failed",
+                        task.update(status="failed", phase="failed",failure_stage="worker",
                                     failure="Worker 未能完成当前步骤。请检查执行环境后重试。")
                         self.save(db, task, "Worker execution failed")
 
@@ -203,12 +299,41 @@ class RuntimeAdapter:
         self.root = root
         self.training = {}
 
-    def launch_training(self, workspace, job_id, adapter):
-        self.training = {k:p for k,p in self.training.items() if p.poll() is None}
-        if job_id not in self.training:
-            self.training[job_id] = subprocess.Popen(
-                [sys.executable,str(BASE/"beans.py"),str(self.root),workspace,job_id,adapter],
-                stdin=subprocess.DEVNULL,start_new_session=True)
+    def launch_training(self, workspace, job_id, adapter, number):
+        self.training = {key:proc for key,proc in self.training.items() if proc.poll() is None}
+        directory = beans.attempt_dir(self.root,job_id,number)
+        directory.mkdir(parents=True,exist_ok=True)
+        with (directory/"worker.log").open("ab") as log:
+            self.training[job_id,number] = subprocess.Popen(
+                [sys.executable,str(BASE/"beans.py"),str(self.root),workspace,job_id,adapter,str(number)],
+                stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
+
+    def owns_training(self, job_id, number):
+        return (job_id,number) in self.training
+
+    def training_exit(self, job_id, number):
+        proc = self.training.get((job_id,number))
+        return proc.poll() if proc else None
+
+    def stop_training(self, job_id, number):
+        proc = self.training.get((job_id,number))
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+    @staticmethod
+    def training_locked(directory):
+        path = directory/"lock"
+        if not path.exists():
+            return False
+        with path.open("rb") as lock:
+            try:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+        return False
 
     def run(self, key):
         subprocess.run([sys.executable, str(BASE/"app.py"), "--state", str(self.root), "--worker", key],
@@ -247,7 +372,7 @@ class ResearchWorker:
             guardrail=task["constraints"].get("guardrail_metric","overall_auc")
             if real and not (self.p.repo/"data/iris.json").exists():
                 self.p.write("data/iris.json",iris.dataset())
-                self.p.commit("Lock UCI Iris data and split")
+                self.p.commit("Lock UCI Iris data and split", "data/iris.json")
             if bean and not (self.p.repo/"data/dry-bean.csv.gz").exists():
                 target = self.p.repo/"data/dry-bean.csv.gz"
                 target.parent.mkdir(exist_ok=True)
@@ -256,10 +381,10 @@ class ResearchWorker:
                 temp.replace(target)
                 self.p.write("evaluation/beans-protocol.json",{"sha256":beans.dataset()["sha256"],"seed":602,
                              "baseline":beans.BASELINE,"split":["train","validation","test"]})
-                self.p.commit("Lock UCI Dry Bean data and evaluation protocol")
+                self.p.commit("Lock UCI Dry Bean data and evaluation protocol", "data/dry-bean.csv.gz", "evaluation/beans-protocol.json")
             if ntl and not (self.p.repo/"evaluation/name-llm-protocol.json").exists():
                 self.p.write("evaluation/name-llm-protocol.json",task["environment"]["manifest"])
-                self.p.commit("Lock Name That LLM prompt split protocol")
+                self.p.commit("Lock Name That LLM prompt split protocol", "evaluation/name-llm-protocol.json")
             feedback = []
             for item in self.p.all(db, "inbox"):
                 if item["task"] == key and not item["consumed"]:
@@ -269,17 +394,30 @@ class ResearchWorker:
             if task["pending_job"]:
                 job = self.p.get(db, "job", task["pending_job"])
                 result = job["result"]
-                accepted = (result[guardrail] >= task["constraints"]["overall_auc_floor"]
-                            and result[primary] > task["best"][primary])
-                report = f"reports/{job['id']}.md"
-                self.p.write(report, f"# Round {task['round']}\n\nRevision: {job['revision']}\n\n"
-                             f"Configuration: {job.get('config',job['strength'])}\n\nMetrics: {result}\n\n"
-                             f"Decision: {'adopt' if accepted else 'retain prior baseline'}\n")
+                floor = task["constraints"]["overall_auc_floor"]
+                previous_best = task["best"][primary]
+                passed = result[guardrail] >= floor
+                accepted = passed and result[primary] > previous_best
                 reference = task.get("baseline_metrics", {}).get(primary)
+                assessment = {
+                    "objective":task["goal"],
+                    "primary_metric":primary,
+                    "previous_best":previous_best,
+                    "guardrail_metric":guardrail,
+                    "guardrail_floor":floor,
+                }
+                report = f"reports/{job['id']}.md"
+                decision = ("Promote for review" if accepted else
+                            "Rejected by guardrail" if not passed else "Did not beat the current best")
+                self.p.write(report, f"# Round {task['round']}\n\n## Research objective\n{task['goal']}\n\n"
+                             f"Configuration: {job.get('config',job['strength'])}\n\n## Analysis\n"
+                             f"{primary}: {result[primary]:.6f} vs previous best {previous_best:.6f}.\n"
+                             f"{guardrail}: {result[guardrail]:.6f} vs minimum {floor:.6f}.\n"
+                             f"Decision: {decision}.\n\n## Evidence\nRevision: {job['revision']}\nMetrics: {result}\n")
                 record = {**job, "task": key, "round": task["round"], "accepted": accepted,
-                          "guardrail_passed": result[guardrail] >= task["constraints"]["overall_auc_floor"],
+                          "guardrail_passed": passed, "assessment":assessment,
                           "baseline_delta": round(result[primary]-reference, 6) if reference is not None else None,
-                          "report": report, "report_commit": self.p.commit(f"Record {job['id']}")}
+                          "report": report, "report_commit": self.p.commit(f"Record {job['id']}", report)}
                 self.p.put(db, "experiment", job["id"], record)
                 if accepted:
                     task["best"] = {**result, "strength": job["strength"], "revision": job["revision"]}
@@ -346,13 +484,14 @@ class ResearchWorker:
                 self.p.put(db,"inbox",item["id"],item)
             task["round"] += 1
             jobid = f"{key}-{task['round']}"
+            model_path = f"models/{jobid}."+("json" if bean or ntl or real else "py")
             if bean or ntl:
-                self.p.write(f"models/{jobid}.json",candidate)
+                self.p.write(model_path,candidate)
             elif real:
-                self.p.write(f"models/{jobid}.json",{"k":k,"scale":scale})
+                self.p.write(model_path,{"k":k,"scale":scale})
             else:
-                self.p.write(f"models/{jobid}.py", f"STRENGTH = {strength}\n\ndef smooth(raw, prior):\n    return (1-STRENGTH)*raw + STRENGTH*prior\n")
-            revision = self.p.commit(f"Prepare {jobid}")
+                self.p.write(model_path, f"STRENGTH = {strength}\n\ndef smooth(raw, prior):\n    return (1-STRENGTH)*raw + STRENGTH*prior\n")
+            revision = self.p.commit(f"Prepare {jobid}", model_path)
             task["phase"] = "submitting"
             self.manager.save(db, task, f"Submitting {jobid}")
             if bean or ntl:
@@ -423,11 +562,12 @@ def serve(project, port):
 
         def do_GET(self):
             if self.path == "/v1/state":
-                with project.tx() as db:
-                    return self.send(workspace.state(db))
+                with project.tx(readonly=True) as db:
+                    state = workspace.state(db)
+                return self.send(state)
             if self.path != "/api/state":
                 return self.send({"error": "Not found"}, 404)
-            with project.tx() as db:
+            with project.tx(readonly=True) as db:
                 state = {k: project.all(db, k) for k in ("task", "experiment", "chat", "progress", "inbox")}
                 state["settings"] = project.get(db, "settings", "active")
             state["knowledge"] = {"protocol": CONSTRAINTS, "history": json.loads((project.repo/"history.json").read_text())}
@@ -445,7 +585,21 @@ def serve(project, port):
                     raise ValueError("Expected an object.")
                 with project.tx() as db:
                     if self.path == "/v1/action":
-                        result = workspace.action(db,request)
+                        request_key = request.pop("request_key",None)
+                        if request_key is None:
+                            result = workspace.action(db,request)
+                        else:
+                            if not isinstance(request_key,str) or not re.fullmatch(r"[a-zA-Z0-9_-]{16,100}",request_key):
+                                raise ValueError("Invalid request key.")
+                            digest = hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()
+                            previous = project.get(db,"request",request_key)
+                            if previous:
+                                if digest != previous["digest"]:
+                                    raise ValueError("Request key already used with different data.")
+                                result = previous["result"]
+                            else:
+                                result = workspace.action(db,request)
+                                project.put(db,"request",request_key,{"digest":digest,"result":result})
                     elif self.path == "/api/chat":
                         result = main.reply(db, request)
                     elif self.path == "/api/settings":

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import random
+import signal
 import time
 from collections import Counter, defaultdict
 from functools import lru_cache
@@ -14,6 +15,7 @@ from pathlib import Path
 
 SOURCE = "https://doi.org/10.24432/C50S4B"
 BASELINE = {"family": "centroid", "prior": 0.0, "weights": [1.0] * 16}
+TRAINING_TIMEOUT = 120
 STRATEGIES = {"centroid": "质心与特征消融", "bayes": "高斯朴素贝叶斯", "adaptive": "自适应特征权重"}
 
 
@@ -97,8 +99,13 @@ def baseline():
     return evaluate(dataset(), BASELINE)
 
 
-def train_job(root, workspace, job_id, adapter="beans"):
+def attempt_dir(root, job_id, number):
     job = root/"training"/job_id
+    return job/f"attempt-{number}" if number else job
+
+
+def train_job(root, workspace, job_id, adapter="beans", number=0):
+    job = attempt_dir(root,job_id,number)
     job.mkdir(parents=True,exist_ok=True)
     receipt = job/"result.json"
     with (job/"lock").open("a") as lock:
@@ -119,6 +126,7 @@ def train_job(root, workspace, job_id, adapter="beans"):
                 result=evaluate(dataset(str(repo/"data"/"dry-bean.csv.gz")),candidate)
             payload={"metrics":result,"started_at":started,"ended_at":time.time()}
         except Exception as exc:
+            print(type(exc).__name__,flush=True)
             payload={"error":type(exc).__name__,"started_at":started,"ended_at":time.time()}
         temp=receipt.with_suffix(".tmp")
         temp.write_text(json.dumps(payload),encoding="utf-8")
@@ -131,5 +139,7 @@ if __name__=="__main__":
     parser.add_argument("workspace")
     parser.add_argument("job")
     parser.add_argument("adapter",choices=("beans","name-llm"),nargs="?",default="beans")
+    parser.add_argument("number",type=int,nargs="?",default=0)
     args=parser.parse_args()
-    train_job(args.root,args.workspace,args.job,args.adapter)
+    signal.alarm(TRAINING_TIMEOUT)
+    train_job(args.root,args.workspace,args.job,args.adapter,args.number)

@@ -65,16 +65,32 @@ struct APIError: LocalizedError { let message: String; var errorDescription: Str
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(message:str(row,"error","请求失败。")) }
         return row
     }
+    private var pendingActions: [Data: String] = [:]
+
     func action(_ payload: Record, then: @escaping (Record)->Void = {_ in}) {
         guard connected, !busy else { return }
         busy = true
         error = ""
         Task {
             defer { busy = false }
-            do { let result = try await request("v1/action",payload); try await refresh(); busy = false; then(result) }
-            catch { self.error = error.localizedDescription }
+            do {
+                let signature = try JSONSerialization.data(withJSONObject: payload, options: .sortedKeys)
+                let key = pendingActions[signature] ?? UUID().uuidString
+                pendingActions[signature] = key
+                var requestPayload = payload
+                requestPayload["request_key"] = key
+                let result = try await request("v1/action", requestPayload)
+                pendingActions.removeValue(forKey: signature)
+                do { try await refresh() }
+                catch { self.error = "操作已保存，暂未同步最新状态。" }
+                busy = false
+                then(result)
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
+
 }
 
 let paper = Color(red:0.98,green:0.97,blue:0.94)
@@ -173,11 +189,9 @@ struct RootView: View {
         .sheet(item:$sheet) { item in
             switch item {
             case let .workspace(snapshot,attach):
-                WorkspaceForm(api:api,row:snapshot) { row in
+                WorkspaceForm(api:api,row:snapshot,attachPlan:attach ? planID : "") { row in
                     projectID=str(row,"id"); sheet=nil
-                    if attach {
-                        api.action(["op":"attach","id":planID,"workspace":projectID])
-                    } else { page = .projects }
+                    if !attach { page = .projects }
                 }
             case let .plan(project,thread):
                 PlanForm(api:api,projectID:project,thread:thread) { row in
@@ -542,6 +556,7 @@ struct WorkspaceForm: View {
     @Environment(\.dismiss) var dismiss
     @ObservedObject var api:Client
     let row:Record
+    let attachPlan:String
     let save:(Record)->Void
     @State private var fields:[String:String]=[:]
     @State private var mode="local"
@@ -581,6 +596,7 @@ struct WorkspaceForm: View {
     func payload(_ op:String)->Record {
         var data=fields as Record
         data["op"]=op;data["mode"]=mode;data["floor"]=Double(floor) ?? -1;data["id"]=str(row,"id")
+        if op=="workspace" && !attachPlan.isEmpty { data["attach_plan"]=attachPlan }
         return data
     }
 }

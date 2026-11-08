@@ -42,37 +42,117 @@ async function load(){
  catch(e){if(!S)$('#main').innerHTML='<div class="loading">无法连接研究服务。'+btn('重试','retry')+'</div>'}
  finally{refreshing=false}
 }
+const pendingActions=new Map();
 async function act(payload,done=()=>{}){
- if(busy)return;busy=true;epoch++;
- const err=$('#modal .submit-error');if(err)err.textContent='';
- try{const row=await api('/v1/action',payload);S=await api('/v1/state');done(row);render()}
- catch(e){if(err&&$('#modal').open)err.textContent=e.message;else notice(e.message)}
+ if(busy)return;
+ busy=true;epoch++;
+ const err=$('#modal .submit-error');
+ if(err)err.textContent='';
+ const signature=JSON.stringify(payload);
+ const key=pendingActions.get(signature)||crypto.randomUUID();
+ pendingActions.set(signature,key);
+ let row;
+ try{
+   row=await api('/v1/action',{...payload,request_key:key});
+ }catch(e){
+   if(err&&$('#modal').open)err.textContent=e.message;
+   else notice(e.message);
+   busy=false;
+   return;
+ }
+ pendingActions.delete(signature);
+ let refreshFailed=false;
+ try{S=await api('/v1/state')}catch{refreshFailed=true}
  finally{busy=false}
+ done(row);
+ render();
+ if(refreshFailed)notice('操作已保存，正在重新同步。');
 }
-function nav(p,key=''){
+function nav(p,key='',fromRecent=false){
  $('#notice').hidden=true;
  id=key;
  if(p==='智能体'){agentTab='概览';returnPlan=''}
- page=p;render()
+ page=p;if(!fromRecent)rememberView(p,key);render()
 }
 function switcher(title, rows, act, selected, footer, a11y){
  return '<details class="switcher"><summary aria-label="'+E(a11y)+'" title="'+E(title)+'"><span>'+E(title)+'</span><span aria-hidden="true">⌄</span></summary><div class="switch-menu" data-filter-scope>'+search('搜索'+a11y.replace('切换',''))+'<div class="switch-rows">'+rows.map(([key,name,meta])=>'<button type="button" data-filter-item data-act="'+act+'" data-key="'+E(key)+'" '+(key===selected?'aria-current="true"':'')+'><span><strong>'+E(name)+'</strong><small>'+E(meta)+'</small></span>'+(key===selected?'✓':'')+'</button>').join('')+'<p class="filter-empty" hidden>没有匹配结果。</p></div>'+(footer?'<div class="switch-footer">'+footer+'</div>':'')+'</div></details>';
 }
+const glyphs={
+ home:'<path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-6h6v6"/>',
+ agent:'<rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4m-4 5h.01m8 0h.01m-7 4h6"/>',
+ tools:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7m-3.5-3.5h7"/>',
+ settings:'<circle cx="12" cy="12" r="3"/><path d="m9 3-1 3-3 1-2 3 2 2-1 4 3 2 3-1 2 4 3-2 1-3 4-1 1-3-3-2V6l-3-2-3 2z"/>',
+ project:'<path d="M3 7h7l2 2h9v10H3z"/>',
+ chat:'<path d="M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/>',
+ plans:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h4"/>',
+
+};
+const icon=(name)=>'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+glyphs[name]+'</svg>';
+const projectIcon=()=>'<span class="project-icon">'+icon('project')+'</span>';
+let recentViews=[];
+try{recentViews=JSON.parse(localStorage.getItem('tripsci-recent')||'[]')}catch{}
+let projectsExpanded=true;
+let chatMode='chat', draftProject='';
+function rememberView(kind,key){
+ if(!key||!['聊天','研究计划'].includes(kind))return;
+ recentViews=[{kind,key},...recentViews.filter(x=>x.kind!==kind||x.key!==key)].slice(0,12);
+ localStorage.setItem('tripsci-recent',JSON.stringify(recentViews));
+}
+function sideButton(text,action,key,symbol,active=false){
+ return '<button type="button" class="quiet side-link" title="'+E(text)+'" data-act="'+action+'" data-key="'+E(key)+'" '+(active?'aria-current="page"':'')+'>'+symbol+'<span>'+E(text)+'</span></button>';
+}
 function sidebar(){
- const navs=[['新聊天','聊天'],['研究计划','研究计划'],['项目','项目'],['智能体','智能体'],['工具','工具'],['设置','设置']];
- return '<div class="brand">'+mark+'TripSci</div><nav aria-label="工作区">'+navs.map(([t,p])=>'<div class="navrow"><button type="button" class="quiet" data-act="nav" data-key="'+p+'" '+(page===p?'aria-current="page"':'')+'>'+t+'</button></div>').join('')+'</nav>'+
- (all('thread').length?'<h4>最近聊天</h4>'+all('thread').slice(-8).reverse().map(t=>'<button type="button" class="quiet recent" data-act="chat" data-key="'+E(t.id)+'">'+E(t.title)+'</button>').join(''):'');
+ const work=['项目','聊天','研究计划','实验库'].includes(page);
+ const railItems=[['工作区','项目','home'],['智能体','智能体','agent'],['工具','工具','tools'],['设置','设置','settings']];
+ const rail=railItems.map(([label,key,glyph])=>'<button type="button" class="rail-link" title="'+label+'" aria-label="'+label+'" data-act="nav" data-key="'+key+'" '+((key==='项目'?work:page===key)?'aria-current="page"':'')+'>'+icon(glyph)+'</button>').join('');
+ const projects=all('workspace').map(w=>{
+   const children=all('plan').filter(p=>p.workspace===w.id).slice().reverse();
+   return '<div class="side-project"><div class="side-project-row">'+
+     sideButton(w.name,'project',w.id,projectIcon(),page==='项目'&&id===w.id)+'</div>'+
+     (children.length?'<div class="side-project-plans">'+children.map(p=>sideButton(p.title,'plan',p.id,icon('plans'),page==='研究计划'&&id===p.id)).join('')+'</div>':'')+'</div>';
+ }).join('');
+ const kinds={'聊天':['thread','chat','chat'],'研究计划':['plan','plan','plans']};
+ const chats=all('thread').slice(-6).reverse();
+ const plans=all('plan').slice(-8).reverse();
+ const entries=[...recentViews];
+ for(let i=0;i<Math.max(chats.length,plans.length);i++){
+   if(chats[i])entries.push({kind:'聊天',key:chats[i].id});
+   if(plans[i])entries.push({kind:'研究计划',key:plans[i].id});
+ }
+ const seen=new Set();
+ const recent=entries.map(({kind,key})=>{
+   if(!kinds[kind]||seen.has(key))return '';
+   seen.add(key);
+   const [collection,action,glyph]=kinds[kind], row=get(collection,key);
+   return row?sideButton(row.title||row.name,action,key,icon(glyph),page===kind&&id===key):'';
+ }).filter(Boolean).slice(0,8);
+ return '<nav class="primary-nav" aria-label="一级导航">'+rail+'</nav><div class="workspace-nav"><div class="brand">'+mark+'TripSci</div><nav aria-label="工作区">'+
+ sideButton('新聊天','newChat','',icon('chat'),page==='聊天'&&!id)+'</nav>'+
+ '<section class="project-section" aria-label="项目"><div class="project-heading">'+sideButton('项目','nav','项目','',page==='项目'&&!id)+
+ '<button type="button" class="quiet project-add" aria-label="新建项目" title="新建项目" data-act="newProject">＋</button>'+
+ (projects?'<button type="button" class="quiet project-expand" aria-label="'+(projectsExpanded?'收起所有项目':'展开所有项目')+'" aria-controls="project-tree" aria-expanded="'+projectsExpanded+'" data-act="toggleProjects">'+(projectsExpanded?'⌄':'›')+'</button>':'')+
+ '</div><div id="project-tree" class="project-tree"'+(projectsExpanded?'':' hidden')+'>'+projects+'</div></section>'+
+ '<section class="recent-section" aria-label="最近"><h4>最近</h4>'+
+ '<div class="recent-items">'+recent.join('')+'</div></section></div>';
 }
 function transcript(items){
  return items.map(m=>'<div class="msg '+(m.role==='user'?'user':m.role==='event'?'event':'agent')+'">'+(m.role==='agent'?'<span class="avatar">'+mark+'</span>':'')+'<div class="content"><p>'+E(m.text)+'</p></div></div>').join('');
 }
 function composer(hint,context=''){
- const key=page+id;
- return '<div class="compose"><form id="send"><textarea name="text" aria-label="消息" maxlength="4000" placeholder="'+E(hint)+'" required>'+E(drafts[key])+'</textarea><div class="compose-footer"><small>'+E(context)+'</small><button class="primary send" aria-label="发送消息">↑</button></div></form></div>';
+ const key=page+id, newChat=page==='聊天'&&!id, planning=newChat&&chatMode==='plan';
+ const mode=newChat?pick('聊天模式',[['chat','普通聊天'],['plan','新建研究计划']],chatMode):'';
+ const project=planning?pick('计划所属项目',[['','稍后关联项目'],...all('workspace').map(w=>[w.id,w.name])],draftProject):'';
+ return '<div class="compose"><form id="send"><textarea name="text" aria-label="消息" maxlength="'+(planning?'500':'4000')+'" placeholder="'+E(hint)+'" required>'+E(drafts[key])+'</textarea>'+
+ '<div class="compose-footer"><div class="composer-options">'+mode+project+(!newChat?'<small>'+E(context)+'</small>':'')+'</div><button class="primary send" aria-label="'+(planning?'创建研究计划':'发送消息')+'">↑</button></div></form></div>';
 }
 function chat(){
  const t=get('thread',id);
- if(!t)return '<div class="chat-home"><div class="chat-start">'+mark+'<h1>今天想聊什么？</h1>'+composer('自由讨论研究方向、进展或 Skills…')+'</div></div>';
+ if(!t){
+   const planning=chatMode==='plan';
+   return '<div class="chat-home"><div class="chat-start">'+mark+'<h1>'+(planning?'想研究什么？':'今天想聊什么？')+'</h1>'+
+   composer(planning?'写下要验证的想法…':'自由讨论想法、进展或 Skills…')+
+   (planning?'<div class="existing-plans">'+btn('查看已有研究计划','allPlans')+'</div>':'')+'</div></div>';
+ }
  return head(t.title,btn('创建研究计划','newPlan'))+'<div class="dialogue chat-thread"><div class="conversation"><div class="inner">'+transcript(t.messages)+'</div></div>'+composer('继续聊天…')+'</div>';
 }
 function planRow(p){return '<button type="button" class="listrow" data-act="plan" data-key="'+E(p.id)+'"><span class="mono">'+E(p.id.slice(0,7))+'</span><strong>'+E(p.title)+'</strong><small class="projectCol">'+E(get('workspace',p.workspace)?.name||'未关联项目')+'</small>'+label(state(p))+'</button>'}
@@ -80,16 +160,44 @@ function metrics(r){return Object.entries(r||{}).map(([k,v])=>E(metricNames[k]||
 const configLabel=e=>e.adapter==='name-llm'&&e.config?'词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
 const shortScore=(e,k)=>Number.isFinite(e.result?.[k])?(metricNames[k]||k)+' '+e.result[k].toFixed(4):'暂无指标';
 const delta=e=>Number.isFinite(e.baseline_delta)?' · 较基线 '+(e.baseline_delta>=0?'+':'')+e.baseline_delta.toFixed(4):'';
-const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',finished:'实验已结束'};
+const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',finished:'实验已结束'};
 function workerStage(t,job){
  if(t.status==='paused')return '暂停后续调度';
  if(t.status==='failed')return '执行失败';
  if(t.status==='completed')return phases.finished;
+ if(t.phase==='training_retry')return phases.training_retry;
  if(job)return job.result?'分析实验结果':['beans','name-llm'].includes(job.adapter)?'本机训练或等待结果':phases.waiting;
  return phases[t.phase]||'等待调度';
 }
-function experiment(e,key){
- return '<article class="rail-result"><strong>第 '+e.round+' 轮 · '+E(outcome(e))+'</strong><p>'+E(configLabel(e))+'</p><p>'+E(shortScore(e,key)+delta(e))+'</p><details><summary>完整指标与复现信息</summary><p>'+metrics(e.result)+'</p><p class="mono">提交 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details></article>';
+function analyzeRun(e,t){
+ const info=e.assessment||{}, primary=info.primary_metric||t?.constraints?.primary_metric;
+ const guard=info.guardrail_metric||t?.constraints?.guardrail_metric||'overall_auc';
+ const threshold=info.guardrail_floor??t?.constraints?.overall_auc_floor;
+ const primaryResult=shortScore(e,primary)+delta(e);
+ const guardEvidence=Number.isFinite(threshold)&&Number.isFinite(e.result?.[guard])
+   ?shortScore(e,guard)+'，最低要求 '+threshold.toFixed(4)+'。':'';
+ const comparison=Number.isFinite(info.previous_best)?'，此前最佳 '+info.previous_best.toFixed(4):'';
+ let conclusion='本轮没有留下可用的比较结论。', expectation='历史记录未保留判定结果。';
+ if(e.guardrail_passed===false){
+   conclusion='本轮未通过护栏，保留此前的候选。'+guardEvidence;
+   expectation='未达到预期。护栏是本计划的最低要求。';
+ }else if(e.accepted){
+   conclusion=primaryResult+comparison+'。本轮成为待评审候选。';
+   expectation='达到本轮验证集的筛选条件。能否推广到保留测试集，需要单独评估。';
+ }else if(e.guardrail_passed===true){
+   conclusion=primaryResult+comparison+'。本轮通过护栏，但未刷新当前最佳。';
+   expectation='部分符合预期。满足护栏，未达到提升目标。';
+ }
+ return {what:configLabel(e),objective:info.objective||t?.goal,conclusion,expectation};
+}
+function runAnalysis(e,t,compact=false){
+ const a=analyzeRun(e,t);
+ return '<div class="run-analysis">'+(!compact&&a.objective?'<p><strong>研究目标</strong> '+E(a.objective)+'</p>':'')+
+ '<p><strong>本轮验证</strong> '+E(a.what)+'</p><p><strong>结论</strong> '+E(a.conclusion)+'</p><p><strong>是否符合预期</strong> '+E(a.expectation)+'</p></div>';
+}
+function experiment(e,t){
+ return '<article class="rail-result"><div class="flex spread"><strong>第 '+e.round+' 轮</strong>'+label(outcome(e))+'</div>'+runAnalysis(e,t,true)+
+ '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p><p class="mono">提交 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details></article>';
 }
 function rail(p){
  const t=task(p), env=t?.environment||get('workspace',p.workspace), job=t&&get('job',t.pending_job), ex=planRuns(p);
@@ -100,35 +208,48 @@ function rail(p){
  out+='<section><h3>Worker</h3>'+kv('执行者',t.agent.name+' · v'+t.agent.version)+(t.status==='failed'?'':kv('当前阶段',stage))+kv('已完成',t.continuous?ex.length+' 轮 · 持续迭代':ex.length+' / '+t.max_experiments+' 轮')+
  '<details><summary>执行配置与阶段记录</summary><p>'+E(env.train)+' · '+E(env.evaluate)+'</p><p>'+E(modeNames[env.mode])+(env.adapter!=='mock'?' · 真实评测':' · 模拟')+'</p><ul>'+all('progress').filter(x=>x.task===t.id&&x.phase&&/preparing code|Submitting|Submitted|analyzing results/.test(x.event)).slice(-8).reverse().map(x=>'<li>'+E(phases[x.phase]||x.phase)+'</li>').join('')+'</ul></details></section>';
  if(t.status==='failed'){
-   out+='<section><h3>恢复执行</h3><p>'+E(t.failure)+'</p>'+btn('重试执行','retryPlan',true)+'</section>';
+   out+='<section><h3>恢复执行</h3><p>'+E(t.failure)+'</p>'+(t.failure_info?.log?'<small>日志 '+E(t.failure_info.log)+'</small>':'')+btn('重试执行','retryPlan',true)+'</section>';
  }else if(t.status!=='completed'){
    out+='<section><h3>进行中的实验</h3>'+(job?'<div class="runbox"><strong>第 '+t.round+' 轮 · '+E(job.result?'结果已返回':job.k||['beans','name-llm'].includes(job.adapter)?'本机评测':'模拟训练')+'</strong><p>'+E(configLabel(job))+'</p></div>':'<p class="muted">'+E(stage)+'，尚无已提交的实验。</p>')+
    '<div class="flex">'+btn(t.status==='paused'?'恢复调度':'暂停后续调度',t.status==='paused'?'resume':'pause')+btn('给 Worker 反馈','feedback')+(t.continuous?btn('结束并生成报告','finishLoop'):'')+'</div></section>'+
    '<section><h3>待安排</h3><p>'+(t.continuous?'每轮结束后等待 '+t.interval+' 秒，再自动提出下一轮。':'还有 '+Math.max(0,t.max_experiments-t.round)+' 轮未提交。')+'</p>'+all('inbox').filter(x=>x.task===t.id&&!['pause','resume'].includes(x.message)).map(x=>'<p>'+label(x.consumed?(x.disposition||'已读取'):'已送达')+' '+E(x.message)+'</p>').join('')+'</section>';
  }
- return out+'<section><h3>已完成实验</h3>'+(ex.slice().sort((a,b)=>b.round-a.round).map(e=>experiment(e,t.constraints.primary_metric)).join('')||'<p class="muted">首轮评测完成后显示摘要。</p>')+'</section>';
+ return out+'<section><h3>已完成实验</h3>'+(ex.slice().sort((a,b)=>b.round-a.round).map(e=>experiment(e,t)).join('')||'<p class="muted">首轮评测完成后显示摘要。</p>')+'</section>';
 }
 function reportText(r){
- return ['# '+r.title,'','## 实验设计',r.goal,'','基线：'+r.baseline+' · 数据：'+r.dataset,'Worker：'+r.agent.name+' v'+r.agent.version,'结论：'+(r.decision||(r.candidate?'有待评审候选':'没有达到采纳条件的候选')),'','## 实验结果',...r.runs.map(e=>'- 第 '+e.round+' 轮：'+configLabel(e)+'；'+shortScore(e,r.primary)+delta(e)+'；'+outcome(e)+'；'+e.revision),...(r.holdout?['','## 保留测试集','基线：'+JSON.stringify(r.holdout.baseline),...(r.holdout.candidate?['候选：'+JSON.stringify(r.holdout.candidate)]:[])]:[])].join('\n');
+ const summaries=r.runs.map(e=>{
+   const a=analyzeRun(e,{goal:r.goal,constraints:{primary_metric:r.primary}});
+   return '- 第 '+e.round+' 轮：'+a.what+'。'+a.conclusion+' '+a.expectation+' 证据 '+e.revision;
+ });
+ return ['# '+r.title,'','## 实验设计',r.goal,'','基线：'+r.baseline+' · 数据：'+r.dataset,'Worker：'+r.agent.name+' v'+r.agent.version,'结论：'+(r.decision||(r.candidate?'有待评审候选':'没有达到采纳条件的候选')),'','## 实验结果',...summaries,...(r.holdout?['','## 保留测试集','基线：'+JSON.stringify(r.holdout.baseline),...(r.holdout.candidate?['候选：'+JSON.stringify(r.holdout.candidate)]:[])]:[])].join('\n');
 }
 function reportCard(p){
  const r=p.report;if(!r)return '';
  const bad=r.runs.filter(e=>e.guardrail_passed===false).length;
+ const holdoutBaseline=r.holdout?.baseline?.[r.primary];
+ const holdoutCandidate=r.holdout?.candidate?.[r.primary];
+ let holdoutConclusion='';
+ if(Number.isFinite(holdoutBaseline)&&Number.isFinite(holdoutCandidate)){
+   const change=holdoutCandidate-holdoutBaseline;
+   holdoutConclusion=change>0?'候选在保留测试集上也高于基线。':
+     change<0?'验证集上的提升未在保留测试集复现。':'候选在保留测试集上与基线持平。';
+ }
  return '<article class="research-report" aria-label="实验报告"><div class="flex spread"><h2>实验报告</h2></div>'+
  '<p>'+E(r.goal)+'</p><p>完成 '+r.runs.length+' / '+r.budget+' 轮 · '+bad+' 轮未通过护栏</p><p>基线：'+E(r.baseline)+(Number.isFinite(r.baseline_value)?' · '+E(metricNames[r.primary]+' '+r.baseline_value.toFixed(4)):'')+'</p>'+
  '<p><strong>'+E(r.candidate?'最佳候选：第 '+r.candidate.round+' 轮 · '+shortScore(r.candidate,r.primary)+delta(r.candidate):'没有超过基线且通过护栏的候选。')+'</strong></p>'+
- '<details><summary>逐轮结果与复现信息</summary>'+r.runs.map(e=>experiment(e,r.primary)).join('')+'</details>'+
- (r.holdout?'<p>保留测试集 · 基线：'+metrics(r.holdout.baseline)+(r.holdout.candidate?'<br>候选：'+metrics(r.holdout.candidate):'')+'</p>':'')+
+ '<details><summary>逐轮结果与复现信息</summary>'+r.runs.map(e=>experiment(e,task(p))).join('')+'</details>'+
+ (r.holdout?'<p>保留测试集 · 基线：'+metrics(r.holdout.baseline)+(r.holdout.candidate?'<br>候选：'+metrics(r.holdout.candidate):'')+(holdoutConclusion?'<br><strong>'+E(holdoutConclusion)+'</strong>':'')+'</p>':'')+
  (p.decision?'<p>结论：'+E(p.decision)+'</p>':'<div class="flex report-actions">'+(r.candidate?btn('保留候选','decision',true,'保留候选'):'')+btn('不采用','decision',false,'不采用')+'</div>')+
  '<div class="flex report-actions">'+btn('下载报告','downloadReport')+btn('配置 Worker','reportWorker',false,r.agent.id)+btn('从报告创建 Skill','reportSkill',false,r.agent.id)+'</div></article>';
 }
 function updateRail(){const p=get('plan',id), old=$('.rail');if(!p||!old)return;const y=old.scrollTop, expanded=Array.from(old.querySelectorAll('details'),d=>d.open);old.innerHTML=rail(p);old.querySelectorAll('details').forEach((d,i)=>d.open=!!expanded[i]);old.scrollTop=y}
+const researchTabs=active=>tabs(['研究计划','实验记录'],active,'researchTab');
 const planGroups=['计划中','进行中','待评审','已暂停','执行失败','已完成'];
 function plans(){
  const p=get('plan',id), list=all('plan').slice().reverse(), create=btn('＋ 新建计划','newPlan',true);
  if(!p){
-   if(!list.length)return head('研究计划')+body(empty('还没有研究计划','建议先创建项目并设置评测，再从项目看板制定研究计划。',all('workspace').length?create:btn('去创建项目','nav',true,'项目')));
-   return head('研究计划',create)+body('<div data-filter-scope><div class="library-bar">'+search('搜索计划、项目或状态')+'</div>'+
+   if(!list.length)return head('研究计划')+body(researchTabs('研究计划')+empty('还没有研究计划','建议先创建项目并设置评测，再从项目看板制定研究计划。',all('workspace').length?create:btn('去创建项目','nav',true,'项目')));
+   return head('研究计划',create)+body(researchTabs('研究计划')+'<div data-filter-scope><div class="library-bar">'+search('搜索计划、项目或状态')+'</div>'+
    planGroups.filter(k=>list.some(p=>state(p)===k)).map(k=>{const rows=list.filter(p=>state(p)===k);
      return '<details class="plan-group" data-detail="'+E(k)+'" open><summary>'+E(k)+' '+label(rows.length)+'</summary>'+rows.map(p=>'<div data-filter-item>'+planRow(p)+'</div>').join('')+'</details>';
    }).join('')+'<p class="filter-empty" hidden>没有匹配结果。</p></div>');
@@ -145,9 +266,23 @@ function plans(){
 }
 function outcome(e){return e.guardrail_passed===false?'未通过护栏':e.accepted?'通过护栏 · 有改进':'通过护栏 · 未改进'}
 function experimentSummary(e,p){
- const t=task(p), key=t?.constraints?.primary_metric, value=e.result?.[key];
- const idea=configLabel(e);
- return '<article class="result-row"><div class="flex spread"><strong>'+E(p.title)+' · 第 '+E(e.round)+' 轮</strong>'+label(outcome(e))+'</div><p>'+E(idea)+(value==null?'':' · <b>'+E(metricNames[key])+' '+Number(value).toFixed(4)+'</b>'+E(delta(e)))+'</p><details data-detail="'+E(e.id)+'"><summary>查看指标与复现信息</summary><p>'+metrics(e.result)+'</p><p class="mono">代码 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details>'+btn('打开研究计划','plan',false,p.id)+'</article>';
+ const t=task(p);
+ return '<article class="result-row"><div class="flex spread"><strong>'+E(p.title)+' · 第 '+E(e.round)+' 轮</strong>'+label(outcome(e))+'</div>'+runAnalysis(e,t)+
+ '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p><p class="mono">代码 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details>'+btn('打开研究计划','plan',false,p.id)+'</article>';
+}
+let experimentProject='', experimentOutcome='', experimentLimit=25;
+function experimentLibrary(){
+ const planByTask=new Map(all('plan').filter(p=>p.task).map(p=>[p.task,p]));
+ const matching=all('experiment').filter(e=>{
+   const p=planByTask.get(e.task);
+   return p&&(!experimentProject||p.workspace===experimentProject)&&(!experimentOutcome||outcome(e)===experimentOutcome);
+ }).sort((a,b)=>(b.ready_at||0)-(a.ready_at||0));
+ return head('实验库')+body(researchTabs('实验记录')+'<p class="lede">跨项目复查验证内容、结论和证据。</p><div class="flex library-bar">'+
+ pick('实验所属项目',[['','全部项目'],...all('workspace').map(w=>[w.id,w.name])],experimentProject)+
+ pick('实验结论',[['','全部结论'],...['通过护栏 · 有改进','通过护栏 · 未改进','未通过护栏'].map(x=>[x,x])],experimentOutcome)+'</div>'+
+ (matching.length?matching.slice(0,experimentLimit).map(e=>card(experimentSummary(e,planByTask.get(e.task)))).join(''):
+ empty('暂无匹配实验','已完成的实验会在这里汇总。'))+
+ (matching.length>experimentLimit?btn('显示更多实验','moreExperiments'):''));
 }
 const projectMetrics=p=>p.adapter==='name-llm'?['balanced_accuracy','accuracy']:p.adapter!=='mock'?['macro_f1','accuracy']:['low_freq_auc','overall_auc'];
 function trend(p){
@@ -181,7 +316,7 @@ function projects(){
  if(!p)return head('项目',actions)+body('<div data-filter-scope><div class="library-bar flex spread">'+search('搜索项目')+btn('导入 Iris 任务','iris')+'</div>'+all('workspace').map(w=>{
    const plans=all('plan').filter(q=>q.workspace===w.id), ids=new Set(plans.map(q=>q.task));
    const runs=all('experiment').filter(e=>ids.has(e.task));
-   return '<button type="button" class="study-row project-row" data-filter-item data-act="project" data-key="'+E(w.id)+'"><span><strong>'+E(w.name)+'</strong><small>'+E(modeNames[w.mode])+' · '+E(w.dataset)+'</small></span><small>'+plans.length+' 项研究 · '+runs.length+' 轮实验</small><span aria-hidden="true">›</span></button>';
+   return '<button type="button" class="study-row project-row" data-filter-item data-act="project" data-key="'+E(w.id)+'"><span class="project-cell">'+projectIcon()+'<span><strong>'+E(w.name)+'</strong><small>'+E(modeNames[w.mode])+' · '+E(w.dataset)+'</small></span></span><small>'+plans.length+' 项研究 · '+runs.length+' 轮实验</small><span aria-hidden="true">›</span></button>';
  }).join('')+'<p class="filter-empty" hidden>没有匹配项目。</p></div>');
  const ps=all('plan').filter(x=>x.workspace===p.id), byTask=new Map(ps.filter(x=>x.task).map(x=>[x.task,x]));
  const ex=all('experiment').filter(x=>byTask.has(x.task)).sort((a,b)=>(b.ready_at||0)-(a.ready_at||0));
@@ -205,7 +340,7 @@ function tools(){
  const skills=toolTab==='Skills', discover=toolTab==='发现';
  const shown=discover?[irisTool,beansTool,ntlTool]:items.filter(x=>skills?x.kind==='skill':['link','command'].includes(x.kind));
  const add=discover?'':skills?btn('＋ 新建 Skill','newSkill',true):btn('＋ 添加工具','newTool',true);
- return head('工具',add)+body(tabs(['发现','工作区','Skills'],toolTab,'toolTab')+
+ return head('工具',add)+body(tabs(['发现','我的工具','Skills'],toolTab,'toolTab')+
  '<div data-filter-scope>'+(shown.length?'<div class="library-bar">'+search(skills?'搜索 Skills':discover?'搜索工作流':'搜索链接或命令')+'</div><div class="tile-grid">'+shown.map(toolCard).join('')+'</div>':skills?
  empty('还没有自定义 Skill','创建后可以分配给一个或多个智能体。'):
  empty('还没有保存链接或命令','把常用研究文档和命令参考集中到这里。'))+
@@ -245,11 +380,22 @@ function quickChat(){
 }
 function render(){
  needsRender=false;
- const side=$('#side'), oldNav=side.scrollTop;
- const sidebarHtml=sidebar();if(sidebarHtml!==side._view){side.innerHTML=sidebarHtml;side._view=sidebarHtml;side.scrollTop=oldNav}
+ const side=$('#side'), oldNav=side.querySelector('.workspace-nav')?.scrollTop||0;
+ const sidebarHtml=sidebar();
+ if(sidebarHtml!==side._view){
+   const focused=document.activeElement?.closest('.recent-items button');
+   side.innerHTML=sidebarHtml;
+   side._view=sidebarHtml;
+   side.querySelector('.workspace-nav').scrollTop=oldNav;
+   if(focused){
+     const replacement=[...side.querySelectorAll('.recent-items button')].find(button=>
+       button.dataset.act===focused.dataset.act&&button.dataset.key===focused.dataset.key);
+     replacement?.focus({preventScroll:true});
+   }
+ }
  if(!S){$('#main').innerHTML='<div class="loading">正在连接研究服务…</div>';return}
  const view=page+':'+id, same=renderedView===view;
- const html=({聊天:chat,研究计划:plans,项目:projects,智能体:agents,工具:tools,设置:settings})[page]();
+ const html=({聊天:chat,研究计划:plans,项目:projects,智能体:agents,工具:tools,设置:settings,实验库:experimentLibrary})[page]();
  const main=$('#main');
  if(!same||html!==main._view){
    const saved={}, expanded=new Set(), groups=new Set([...main.querySelectorAll('.plan-group')].map(d=>d.dataset.detail));
@@ -299,7 +445,7 @@ const close=()=>$('#modal').close();
 function saveAgent(a,patch){return act({op:'agent',id:a.id,name:a.name,runtime:a.runtime,instructions:a.instructions,skills:a.skills,...patch},close)}
 document.addEventListener('click',e=>{for(const d of document.querySelectorAll('.switcher[open]'))if(!d.contains(e.target))d.open=false});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){if($('#quick-panel')&&!$('#quick-panel').hidden&&e.target.closest('#quick-chat')){e.target.blur();$('.quick-toggle').click();$('.quick-toggle').focus();return}const d=$('.switcher[open]');if(d){d.open=false;d.querySelector('summary').focus()}}});
-document.addEventListener('toggle',e=>{if(e.target.matches('.switcher[open]'))e.target.querySelector('[data-search]').focus()},true);
+document.addEventListener('toggle',e=>{if(e.target.matches('.switcher[open]'))e.target.querySelector('[data-search]')?.focus()},true);
 document.addEventListener('click',e=>{
  const b=e.target.closest('[data-act]');if(!b)return;const {act:a,key:k}=b.dataset;
  if(a==='quickToggle'){
@@ -309,11 +455,15 @@ document.addEventListener('click',e=>{
    return;
  }
  if(a==='quickFull'){if(!$('#quick-panel').hidden){$('#quick-panel').hidden=true;$('.quick-toggle').setAttribute('aria-expanded','false')}return nav('聊天',quickThread)}
+ if(a==='newChat'){chatMode='chat';draftProject='';return nav('聊天')}
  if(a==='retry')return load();
  if(a==='retryPlan')return act({op:'retry',id});
  if(a==='nav')return nav(k);
- if(a==='chat')return nav('聊天',k);
- if(a==='plan')return nav('研究计划',k);
+ if(a==='researchTab')return nav(k==='实验记录'?'实验库':'研究计划');
+ if(a==='moreExperiments'){experimentLimit+=25;return render()}
+ if(a==='toggleProjects'){projectsExpanded=!projectsExpanded;return render()}
+ if(a==='chat')return nav('聊天',k,!!b.closest('.recent-items'));
+ if(a==='plan')return nav('研究计划',k,!!b.closest('.recent-items'));
  if(a==='togglePlanStatus'){if(openPlanStatus.has(id))openPlanStatus.delete(id);else openPlanStatus.add(id);return render()}
  if(a==='planPrompt'){const field=$('#send textarea');if(!field.value){field.value=k;drafts[page+id]=k}field.focus();return}
  if(a==='resultFilter'){resultFilters[current().id]=k;return render()}
@@ -368,6 +518,15 @@ document.addEventListener('click',e=>{
  if(['pause','resume','decision'].includes(a))act({op:a,id,value:k});
 });
 document.addEventListener('change',e=>{
+ if(e.target.name==='聊天模式'){
+   chatMode=e.target.value;render();$('#send textarea')?.focus();return;
+ }
+ if(e.target.name==='计划所属项目'){draftProject=e.target.value;return}
+
+ if(e.target.name==='实验所属项目'||e.target.name==='实验结论'){
+   if(e.target.name==='实验所属项目')experimentProject=e.target.value;else experimentOutcome=e.target.value;
+   experimentLimit=25;return render();
+ }
  if(e.target.name==='趋势指标'){chartChoices[current().id]=e.target.value;render()}
  if(e.target.name==='strategy'&&get('workspace',get('plan',id)?.workspace)?.adapter==='name-llm')$('#roundBudget input').value=e.target.value==='adaptive'?20:4;
  if(e.target.name==='run_mode'){
@@ -399,24 +558,31 @@ document.addEventListener('submit',async e=>{
  const d=payload(f);
  if(send){
    const text=d.text.trim(), key=page+id;if(!text)return;
-   return act({op:'message',text,[page==='聊天'?'thread':'plan']:id},r=>{delete drafts[key];id=r.id});
+   if(page==='聊天'&&!id&&chatMode==='plan'){
+     if(Array.from(text).length>500)return notice('研究方向请控制在 500 字以内。');
+     const title=Array.from(text.split(/\r?\n/)[0]).slice(0,40).join('');
+     return act({op:'plan',title,direction:text,workspace:draftProject},r=>{
+       delete drafts[key];chatMode='chat';draftProject='';nav('研究计划',r.id);
+     });
+   }
+   return act({op:'message',text,[page==='聊天'?'thread':'plan']:id},r=>{delete drafts[key];id=r.id;rememberView(page,id)});
  }
  if(op==='workspace'){
    const attach=d.attach==='yes', plan=id;delete d.attach;
-   return act({...d,op,floor:Number(d.floor)},r=>{close();project=r.id;if(attach)setTimeout(()=>act({op:'attach',id:plan,workspace:r.id}),0);else{page='项目';id=r.id}});
+   return act({...d,op,attach_plan:attach?plan:'',floor:Number(d.floor)},r=>{close();project=r.id;if(!attach){page='项目';id=r.id;rememberView(page,id)}});
  }
  if(op==='noIntegration')return close();
  if(op==='integration'){
    const p=current(), plans=new FormData(f).getAll('sourcePlan');
    return act({op,workspace:p.id,plans,revision:d.revision,summary:d.summary,metrics:Object.fromEntries(projectMetrics(p).map(k=>[k,Number(d[k])]))},close);
  }
- if(op==='plan')return act({...d,op},r=>{close();page='研究计划';id=r.id});
+ if(op==='plan')return act({...d,op},r=>{close();page='研究计划';id=r.id;rememberView(page,id)});
  if(op==='chooseRuntime')return agentForm({},d.runtime);
  if(op==='chooseTool'){
    const name=kinds[d.kind];return modal('添加'+name,'tool',input('name','名称')+input('target',d.kind==='link'?'链接地址':'命令',undefined,d.kind==='link'?'url':'text')+'<input type="hidden" name="kind" value="'+E(d.kind)+'">','保存');
  }
  if(op==='workerSkill')return act({...d,op:'skill'},()=>{close();notice('已保存并分配给 Worker')});
- if(op==='tool'||op==='skill')return act({...d,op},r=>{close();id=r.id;toolTab=op==='skill'?'Skills':'工作区'});
+ if(op==='tool'||op==='skill')return act({...d,op},r=>{close();id=r.id;toolTab=op==='skill'?'Skills':'我的工具'});
  if(op==='assignSkill'){const x=get('agent',id);return saveAgent(x,{skills:[...new Set([...x.skills,d.skill])]})}
  if(op==='agentInstructions'||op==='renameAgent')return saveAgent(get('agent',id),d);
  if(op==='agent')return act({...d,op,skills:['adaptive-ctr',...(d.wide?['wide-search']:[]),...new FormData(f).getAll('skill')]},r=>{close();id=r.id;agentTab='概览';notice('智能体配置已保存')});

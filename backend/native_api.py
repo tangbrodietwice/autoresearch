@@ -178,6 +178,13 @@ class WorkspaceAPI:
             old = self.p.get(db,"workspace",key)
             if s("id") and not old: raise ValueError("找不到要编辑的项目。")
             if old and old.get("adapter") in ("iris","beans","name-llm"): raise ValueError("公开数据集项目使用固定数据与评测协议。")
+            plan_id=s("attach_plan")
+            if plan_id:
+                plan=self.get(db,"plan",plan_id)
+                if old or plan["task"]:
+                    raise ValueError("只能为尚未启动的计划新建并关联项目。")
+                plan["workspace"]=key
+                self.put(db,"plan",plan)
             return self.put(db,"workspace",dict(config,id=key,version=1 if not old else old["version"]+1))
         if op == "agent":
             key = s("id") or uid()
@@ -295,9 +302,16 @@ class WorkspaceAPI:
             task=self.get(db,"task",plan["task"])
             if task["status"]!="failed": raise ValueError("只有执行失败的计划可以重试。")
             failure=task.pop("failure","")
-            resume_job = failure.startswith("本机训练失败") and task.get("pending_job")
+            stage=task.pop("failure_stage",None)
+            task.pop("failure_info",None)
+            resume_job = (stage=="training" or (stage is None and failure.startswith("本机训练失败"))) and task.get("pending_job")
             if resume_job:
-                (self.p.root/"training"/task["pending_job"]/"result.json").unlink(missing_ok=True)
+                job=self.get(db,"job",task["pending_job"])
+                attempts=job.setdefault("attempts",[])
+                if not attempts:
+                    attempts.append({"number":0,"state":"failed","error_code":"legacy_failure"})
+                job.update(retry_from=len(attempts),retry_at=0)
+                self.put(db,"job",job)
             task.update(status="waiting" if resume_job else "ready",phase="scheduled",not_before=0)
             self.manager.save(db,task,"Retry requested")
         elif op=="finish":

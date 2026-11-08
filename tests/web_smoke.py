@@ -48,8 +48,19 @@ with ExitStack() as stack:
     chat=post("message",text="讨论低频 CTR")
     plan=post("plan",title="低频 CTR",direction="验证平滑",source=chat["id"])
     assert plan["workspace"]==""
-    project=post("workspace",name="CTR",repo="mock",baseline="v1",dataset="mock-v1",train="mock",evaluate="mock",mode="hybrid",training_host="gpu",delivery="git",floor=.715)
-    post("attach",id=plan["id"],workspace=project["id"])
+    config=dict(name="CTR",repo="mock",baseline="v1",dataset="mock-v1",train="mock",evaluate="mock",
+                mode="hybrid",training_host="gpu",delivery="git",floor=.715,request_key="create-project-001")
+    try:
+        post("workspace",**config,attach_plan="missing")
+    except HTTPError as exc:
+        assert exc.code==400
+    else:
+        raise AssertionError("Invalid plan was accepted")
+    assert not json.loads(fetch("/v1/state")[0])["workspace"]
+    project=post("workspace",**config,attach_plan=plan["id"])
+    assert post("workspace",**config,attach_plan=plan["id"])==project
+    current=json.loads(fetch("/v1/state")[0])
+    assert len(current["workspace"])==1 and current["plan"][0]["workspace"]==project["id"]
     post("start",id=plan["id"],budget=2,design="固定数据后验证平滑是否改善低频 CTR")
     for _ in range(100):
         data=json.loads(fetch("/v1/state")[0])

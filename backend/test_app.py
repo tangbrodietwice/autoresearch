@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from app import MainAgent, MockTraining, Project, ResearchWorker, RuntimeAdapter, TaskManager
@@ -44,6 +45,105 @@ class ResearchTest(unittest.TestCase):
             task = p.get(db, "task", key)
             self.assertEqual((task["status"], task["round"]), ("waiting", 1))
             self.assertNotIn("failure", task)
+
+    def test_rollback_recovers_revision_after_other_plan_advances_head(self):
+        project = Project(self.root)
+        worker = ResearchWorker(project)
+        with project.tx() as db:
+            first = worker.manager.create(db,"first plan",1)
+            second = worker.manager.create(db,"second plan",1)
+        project.write("unrelated.txt","Keep this out of the artifact commit")
+        project.git("add","unrelated.txt")
+        with patch.object(MockTraining,"submit",side_effect=OSError("injected submit failure")):
+            with self.assertRaises(OSError):
+                worker.run(first)
+        prepared = project.git("rev-parse","HEAD")
+        worker.run(second)
+        worker.run(first)
+        with project.tx() as db:
+            job = project.get(db,"job",first+"-1")
+        self.assertEqual(job["revision"],prepared)
+        self.assertEqual(project.git("show","--format=","--name-only",prepared),f"models/{first}-1.py")
+        self.assertEqual(project.git("diff","--cached","--name-only"),"unrelated.txt")
+
+    def test_report_commit_recovers_after_database_rollback(self):
+        project = Project(self.root)
+        worker = ResearchWorker(project)
+        with project.tx() as db:
+            first = worker.manager.create(db,"first plan",1)
+            second = worker.manager.create(db,"second plan",1)
+        for key in (first,second):
+            worker.run(key)
+        with project.tx() as db:
+            for key in (first,second):
+                task = project.get(db,"task",key)
+                job = project.get(db,"job",task["pending_job"])
+                job["result"] = MockTraining.poll(job,job["ready_at"])
+                project.put(db,"job",job["id"],job)
+                task["status"] = "ready"
+                project.put(db,"task",key,task)
+        original_put = project.put
+
+        def fail_experiment(db,kind,key,value):
+            if kind=="experiment":
+                raise OSError("injected database write failure")
+            original_put(db,kind,key,value)
+
+        with patch.object(project,"put",side_effect=fail_experiment):
+            with self.assertRaises(OSError):
+                worker.run(first)
+        revision = project.git("rev-parse","HEAD")
+        worker.run(second)
+        worker.run(first)
+        with project.tx() as db:
+            record = project.get(db,"experiment",first+"-1")
+        self.assertEqual(record["report_commit"],revision)
+        self.assertIn(record["revision"],project.git("show",revision+":"+record["report"]))
+
+    def test_training_attempt_failures_are_isolated_and_bounded(self):
+        import beans
+        project = Project(self.root)
+        manager = TaskManager(project)
+        manager.training_retry_delay = 0
+        manager.training_timeout = .1
+        manager.max_training_attempts = 4
+
+        class BrokenRuntime(RuntimeAdapter):
+            def launch_training(self, workspace, job_id, adapter, number):
+                if number==1:
+                    raise OSError(2,"injected launch failure")
+                directory=beans.attempt_dir(self.root,job_id,number)
+                directory.mkdir(parents=True)
+                if number==2:
+                    (directory/"result.json").write_text("{broken")
+                else:
+                    command = ("import time; time.sleep(30)" if number==3 else
+                               "import os, signal; os.kill(os.getpid(),signal.SIGKILL)")
+                    self.training[job_id,number]=subprocess.Popen([sys.executable,"-c",command])
+
+        with project.tx() as db:
+            failed = manager.create(db,"local training",1)
+            healthy = manager.create(db,"unrelated mock",1)
+            task = project.get(db,"task",failed)
+            task.update(status="waiting",workspace="test",pending_job="broken-1")
+            task["constraints"].update(primary_metric="macro_f1",guardrail_metric="accuracy")
+            manager.save(db,task,"Test job")
+            project.put(db,"job","broken-1",{"id":"broken-1","adapter":"beans","ready_at":0})
+        runtime=BrokenRuntime(self.root)
+        try:
+            for _ in range(10):
+                manager.tick(runtime)
+                time.sleep(.12)
+        finally:
+            runtime.stop_training("broken-1",3)
+        with project.tx() as db:
+            task=project.get(db,"task",failed)
+            self.assertEqual(task["status"],"failed")
+            self.assertEqual(task["failure_stage"],"training")
+            self.assertEqual([a["error_code"] for a in project.get(db,"job","broken-1")["attempts"]],
+                             ["launch_failed","invalid_receipt","timeout","missing_receipt"])
+            self.assertIn(project.get(db,"task",healthy)["status"],("waiting","completed"))
+        self.assertTrue((beans.attempt_dir(self.root,"broken-1",2)/"result.json").exists())
 
     def test_contract_and_mock(self):
         p = Project(self.root)
