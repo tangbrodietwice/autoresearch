@@ -49,11 +49,14 @@ function server(args){
   await page.getByText('还没有自定义 Skill').waitFor();
   assert.equal(await page.getByRole('button',{name:'＋ 新建 Skill',exact:true}).count(),1);
   await audit();
-  await page.getByRole('button',{name:'发现',exact:true}).click();
   await side('项目').click();
   await page.getByRole('heading',{name:'从第一个研究项目开始'}).waitFor();
   await audit();
-  await page.getByRole('button',{name:'使用示例'}).click();
+  assert.equal(await page.locator('#main').getByRole('button',{name:/Iris|Dry Bean|示例/}).count(),0);
+  await page.locator('#main').getByRole('button',{name:/新建项目/}).click();
+  for(const [label,value] of Object.entries({'代码地址':'fixture/ctr','默认基线':'v1','数据版本':'synthetic-v1','训练入口':'train.py','评测入口':'evaluate.py'})){
+    await page.getByLabel(label,{exact:true}).fill(value);
+  }
   await page.getByLabel('项目名称').fill('UI 测试项目');
   await page.getByRole('button',{name:'保存项目'}).click();
   await page.locator('summary[aria-label="切换项目"]').filter({hasText:'UI 测试项目'}).waitFor();
@@ -207,10 +210,6 @@ function server(args){
   await page.getByRole('button',{name:/重复性检查/}).waitFor();
   assert.equal(await page.getByRole('button',{name:'＋ 添加工具',exact:true}).count(),0);
   await audit();
-  await page.getByRole('button',{name:'发现',exact:true}).click();
-  await page.getByRole('button',{name:/Iris 实验启动器/}).click();
-  await page.getByRole('heading',{name:'Iris 实验启动器'}).waitFor();
-  await audit();
   await page.getByRole('button',{name:'智能体',exact:true}).click();
   await page.getByRole('button',{name:/研究 Worker/}).click();
   await page.getByRole('button',{name:'指令',exact:true}).click();
@@ -223,7 +222,10 @@ function server(args){
   await audit();
   await page.reload();
   await page.locator('.project-row').filter({hasText:'UI 测试项目'}).waitFor();
-  await page.getByRole('button',{name:'导入 Iris 任务',exact:true}).click();
+  assert.equal(await page.locator('#main').getByRole('button',{name:/导入 Iris|导入 Dry Bean/}).count(),0);
+  const iris=await (await page.request.post(web+'/v1/action',{data:{op:'import_iris'}})).json();
+  assert.ok(iris.id);
+  await page.locator('.side-project-plans').getByRole('button',{name:'改进 Iris 分类器',exact:true}).click();
   await page.getByRole('heading',{name:'改进 Iris 分类器',exact:true}).waitFor();
   await page.locator('summary[aria-label="切换研究计划"]').click();
   await page.locator('.switch-rows button').filter({hasText:'讨论低频 CTR'}).click();

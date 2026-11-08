@@ -286,12 +286,7 @@ struct RootView: View {
                     Spacer()
                     Button("新建项目",systemImage:"plus"){openProject()}.buttonStyle(.borderedProminent)
                 }
-                if project.isEmpty {
-                    HStack(alignment:.top,spacing:16) {
-                        Surface { Label("从空白开始",systemImage:"folder"); Text("填写自己的项目配置。").foregroundStyle(.secondary); Button("填写项目表单"){openProject()} }
-                        Surface { Label("CTR 模拟项目",systemImage:"chart.line.uptrend.xyaxis"); Text("预填配置，直接体验研究流程。").foregroundStyle(.secondary); Button("使用示例"){openProject(["name":"CTR 排序研究","repo":"synthetic/ctr","baseline":"v1","dataset":"synthetic-v1","train":"train.py","evaluate":"evaluate.py"])} }
-                    }
-                } else {
+                if !project.isEmpty {
                     Picker("项目",selection:Binding(get:{str(project,"id")},set:{projectID=$0})) {
                         ForEach(workspaces,id:\.identity){ Text(str($0,"name")).tag(str($0,"id")) }
                     }.frame(maxWidth:350)

@@ -5,7 +5,7 @@ const statusNames={ready:'进行中',waiting:'进行中',paused:'已暂停',fail
 const modes={local:[],hybrid:[['training_host','远端训练连接'],['delivery','代码交付方式']],remote:[['agent_host','远端 Agent 连接'],['remote_dir','远端工作目录']]};
 let S=null,page='项目',id='',project='',busy=false,timer,refreshing=false,epoch=0;
 const drafts={};
-let needsRender=false, toolTab='发现', agentTab='概览', returnPlan='';
+let needsRender=false, toolTab='我的工具', agentTab='概览', returnPlan='';
 const resultFilters={}, openPlanStatus=new Set();
 const chartChoices={};
 const metricNames={balanced_accuracy:'Balanced Accuracy',macro_f1:'Macro F1',accuracy:'准确率',low_freq_auc:'低频 AUC',overall_auc:'整体 AUC'};
@@ -312,8 +312,9 @@ function integrationForm(){
 }
 function projects(){
  const p=get('workspace',id), actions=btn('＋ 新建项目','newProject',true);
- if(!all('workspace').length)return head('项目')+body('<section class="guide"><div class="guide-copy">'+title('从第一个研究项目开始','配置代码、训练与评测入口。实验开始后，结果会自动回到项目看板。')+actions+'</div><div class="guide-options"><h2>从模板开始</h2>'+card('<h3>CTR 排序研究</h3><p>预填模拟仓库、数据和评测设置。</p>'+btn('使用示例','sample'))+card('<h3>Iris 鸢尾花分类</h3><p>使用公开真实数据，自动创建项目和研究草稿。</p>'+btn('导入 Iris 任务','iris',true))+'</div></section>');
- if(!p)return head('项目',actions)+body('<div data-filter-scope><div class="library-bar flex spread">'+search('搜索项目')+btn('导入 Iris 任务','iris')+'</div>'+all('workspace').map(w=>{
+ if(!all('workspace').length)return head('项目')+body('<section class="guide guide-single"><div class="guide-copy">'+
+ title('从第一个研究项目开始','填写项目的代码、数据和评测配置，再创建第一项研究。')+actions+'</div></section>');
+ if(!p)return head('项目',actions)+body('<div data-filter-scope><div class="library-bar flex spread">' +search('搜索项目')+'</div>'+all('workspace').map(w=>{
    const plans=all('plan').filter(q=>q.workspace===w.id), ids=new Set(plans.map(q=>q.task));
    const runs=all('experiment').filter(e=>ids.has(e.task));
    return '<button type="button" class="study-row project-row" data-filter-item data-act="project" data-key="'+E(w.id)+'"><span class="project-cell">'+projectIcon()+'<span><strong>'+E(w.name)+'</strong><small>'+E(modeNames[w.mode])+' · '+E(w.dataset)+'</small></span></span><small>'+plans.length+' 项研究 · '+runs.length+' 轮实验</small><span aria-hidden="true">›</span></button>';
@@ -327,21 +328,18 @@ function projects(){
  trend(p)+card('<h3>实验结果 <small>（'+ex.length+'）</small></h3>'+(ex.length?tabs(['全部','有改进','未改进','未通过护栏'],filter,'resultFilter')+(shown.map(e=>experimentSummary(e,byTask.get(e.task))).join('')||'<p class="muted">当前筛选没有结果。</p>'):'<p class="muted">首轮评测完成后，这里会显示方案、指标和结论。</p>'))+
  card('<details><summary>项目配置 · v'+E(p.version)+'</summary>'+kv('模式',modeNames[p.mode])+kv('默认基线',p.baseline)+kv('数据',p.dataset)+kv('训练入口',p.train)+kv('评测入口',p.evaluate)+(p.adapter!=='mock'?'<p>固定协议 · 本机真实评测</p>':btn('编辑配置','editProject'))+'</details>'));
 }
-const ntlTool={id:'builtin-ntl',name:'Name That LLM · Kaggle',description:'导入官方训练数据后，按提示分组验证文本来源分类。',kind:'builtin'};
-const beansTool={id:'builtin-beans',name:'Dry Bean 并行研究',description:'七分类真实评测，支持多计划并行和持续迭代。',kind:'builtin'};
-const irisTool={id:'builtin-iris',name:'Iris 实验启动器',description:'导入公开分类数据，生成预填配置和研究草稿。',kind:'builtin'};
-function library(){return [irisTool,beansTool,ntlTool,...all('tool').map(t=>({...t,description:t.kind==='link'?'打开研究文档或外部服务。':'保存常用命令供查看。'})),...all('skill').map(x=>({...x,kind:'skill',description:x.markdown.trim().split(/\r?\n/).find(line=>line.trim()&&!line.startsWith('#'))?.slice(0,110)||'可分配给智能体的 Markdown 指南。'}))]}
-const kinds={builtin:'内置工作流',link:'网页链接',command:'命令参考',skill:'Skill'};
-function toolCard(t){return '<button class="tool-tile" type="button" data-filter-item data-act="toolDetail" data-key="'+E(t.id)+'"><span class="tool-icon" aria-hidden="true">'+({builtin:'✦',link:'↗',command:'›_',skill:'◇'})[t.kind]+'</span><strong>'+E(t.name)+'</strong><small>'+E(t.description)+'</small>'+label(kinds[t.kind])+'</button>'}
+function library(){return [...all('tool').map(t=>({...t,description:t.kind==='link'?'打开研究文档或外部服务。':'保存常用命令供查看。'})),...all('skill').map(x=>({...x,kind:'skill',description:x.markdown.trim().split(/\r?\n/).find(line=>line.trim()&&!line.startsWith('#'))?.slice(0,110)||'可分配给智能体的 Markdown 指南。'}))]}
+const kinds={link:'网页链接',command:'命令参考',skill:'Skill'};
+function toolCard(t){return '<button class="tool-tile" type="button" data-filter-item data-act="toolDetail" data-key="'+E(t.id)+'"><span class="tool-icon" aria-hidden="true">'+({link:'↗',command:'›_',skill:'◇'})[t.kind]+'</span><strong>'+E(t.name)+'</strong><small>'+E(t.description)+'</small>'+label(kinds[t.kind])+'</button>'}
 function tools(){
  const items=library(), t=items.find(x=>x.id===id);
  if(t)return navHeading(btn('工具','nav',false,'工具')+'<span aria-hidden="true">/</span><h1>'+E(t.name)+'</h1>')+body('<div class="detail-intro">'+label(kinds[t.kind])+'<p class="lede">'+E(t.description)+'</p></div>'+
- card(t.id===ntlTool.id?'<h3>导入比赛项目</h3><p>先从 Kaggle 下载训练数据，再用本地导入脚本准备。</p>'+btn('打开已导入的比赛项目','nameLLM',true):t.kind==='builtin'?'<h3>包含的能力</h3><p>下载数据已打包，导入后可直接启动真实本机评测。</p>'+(t.id===beansTool.id?btn('导入 Dry Bean 项目','beans',true):btn('导入 Iris 任务','iris',true)):t.kind==='skill'?'<h3>SKILL.md</h3><pre>'+E(t.markdown)+'</pre>'+btn('管理智能体分配','nav',false,'智能体'):t.kind==='link'?'<h3>链接</h3><a target="_blank" rel="noopener noreferrer" href="'+E(t.target)+'">'+E(t.target)+'</a>':'<h3>命令参考</h3><pre>'+E(t.target)+'</pre><small>仅供查看，TripSci 不会执行。</small>'));
- const skills=toolTab==='Skills', discover=toolTab==='发现';
- const shown=discover?[irisTool,beansTool,ntlTool]:items.filter(x=>skills?x.kind==='skill':['link','command'].includes(x.kind));
- const add=discover?'':skills?btn('＋ 新建 Skill','newSkill',true):btn('＋ 添加工具','newTool',true);
- return head('工具',add)+body(tabs(['发现','我的工具','Skills'],toolTab,'toolTab')+
- '<div data-filter-scope>'+(shown.length?'<div class="library-bar">'+search(skills?'搜索 Skills':discover?'搜索工作流':'搜索链接或命令')+'</div><div class="tile-grid">'+shown.map(toolCard).join('')+'</div>':skills?
+ card(t.kind==='skill'?'<h3>SKILL.md</h3><pre>'+E(t.markdown)+'</pre>'+btn('管理智能体分配','nav',false,'智能体'):t.kind==='link'?'<h3>链接</h3><a target="_blank" rel="noopener noreferrer" href="'+E(t.target)+'">'+E(t.target)+'</a>':'<h3>命令参考</h3><pre>'+E(t.target)+'</pre><small>仅供查看，TripSci 不会执行。</small>'));
+ const skills=toolTab==='Skills';
+ const shown=items.filter(x=>skills?x.kind==='skill':['link','command'].includes(x.kind));
+ const add=skills?btn('＋ 新建 Skill','newSkill',true):btn('＋ 添加工具','newTool',true);
+ return head('工具',add)+body(tabs(['我的工具','Skills'],toolTab,'toolTab')+
+ '<div data-filter-scope>'+(shown.length?'<div class="library-bar">'+search(skills?'搜索 Skills':'搜索链接或命令')+'</div><div class="tile-grid">'+shown.map(toolCard).join('')+'</div>':skills?
  empty('还没有自定义 Skill','创建后可以分配给一个或多个智能体。'):
  empty('还没有保存链接或命令','把常用研究文档和命令参考集中到这里。'))+
  '<p class="filter-empty" hidden>没有匹配结果。</p></div>');
@@ -424,7 +422,6 @@ function render(){
 function modal(title,kind,fields,submit){
  const m=$('#modal');m.innerHTML='<h2>'+E(title)+'</h2><form class="fields" data-form="'+kind+'">'+fields+'<p class="submit-error" role="alert"></p><div class="flex">'+btn('取消','close')+'<button class="primary">'+E(submit)+'</button></div></form>';if(!m.open)m.showModal();
 }
-const sample={name:'CTR 排序研究',repo:'synthetic/ctr',baseline:'v1',dataset:'synthetic-v1',train:'train.py',evaluate:'evaluate.py',floor:.715,mode:'local'};
 function projectForm(p={},attach=false){
  const fields=[['name','项目名称'],['repo','代码地址'],['baseline','默认基线'],['dataset','数据版本'],['train','训练入口'],['evaluate','评测入口']];
  modal(p.id?'编辑项目配置':'初始化研究项目','workspace','<p class="muted">三种配置均使用本机模拟训练。不会连接填写的仓库或远端。</p>'+
@@ -490,16 +487,12 @@ document.addEventListener('click',e=>{
  if(a==='agent')return nav('智能体',k);
  if(a==='close')return close();
  if(a==='newProject'||a==='projectForPlan')return projectForm({},a==='projectForPlan');
- if(a==='sample')return projectForm(sample);
  if(a==='editProject')return projectForm(current());
  if(a==='newPlan')return planForm();
  if(a==='recordIntegration')return integrationForm();
  if(a==='newAgent')return modal('创建智能体 · 1 / 2','chooseRuntime','<h3>在哪里运行？</h3><p class="muted">本机 · 选择检测到的运行时。</p>'+all('runtimes').filter(r=>r.installed).map((r,i)=>'<label class="runtime-choice"><input name="runtime" type="radio" value="'+E(r.id)+'" '+(!i?'checked':'')+' required><span><strong>'+E(r.name)+'</strong><br><small>'+E(runtimeStatus(r))+'</small></span></label>').join(''),'继续');
  if(a==='editAgent')return agentForm(get('agent',id));
- if(a==='nameLLM')return act({op:'import_name_llm'},r=>{page='项目';id=project=r.id});
- if(a==='beans')return act({op:'import_beans'},r=>{page='项目';id=project=r.id});
  if(a==='finishLoop')return modal('结束持续迭代','finish','<p>已提交的实验会完成，再生成报告。不会再启动下一轮。</p>','确认结束');
- if(a==='iris')return act({op:'import_iris'},r=>{page='研究计划';id=r.id;project=r.workspace});
  if(a==='newTool')return modal('添加工具','chooseTool','<p>选择要添加到工作区的工具类型。</p>'+pick('kind',[['link','网页链接'],['command','命令参考']]),'继续');
  if(a==='newSkill')return modal('新建 Skill','skill',input('name','名称')+area('markdown','Skill Markdown'),'保存');
 
