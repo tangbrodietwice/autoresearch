@@ -18,6 +18,33 @@ class ResearchTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
 
+    def test_worker_failure_stops_until_retry(self):
+        from native_api import WorkspaceAPI
+        p = Project(self.root)
+        manager = TaskManager(p)
+        api = WorkspaceAPI(p, manager)
+
+        class BrokenRuntime:
+            def run(self, key):
+                raise subprocess.CalledProcessError(1, "worker")
+
+        with p.tx() as db:
+            key = manager.create(db, "验证失败后恢复", 1)
+            api.put(db, "plan", {"id": "test-plan", "task": key})
+        manager.tick(BrokenRuntime())
+        with p.tx() as db:
+            task = p.get(db, "task", key)
+            self.assertEqual((task["status"], task["round"]), ("failed", 0))
+        manager.tick(RuntimeAdapter(self.root))
+        with p.tx() as db:
+            self.assertEqual(p.get(db, "task", key)["status"], "failed")
+            api.action(db, {"op": "retry", "id": "test-plan"})
+        manager.tick(RuntimeAdapter(self.root))
+        with p.tx() as db:
+            task = p.get(db, "task", key)
+            self.assertEqual((task["status"], task["round"]), ("waiting", 1))
+            self.assertNotIn("failure", task)
+
     def test_contract_and_mock(self):
         p = Project(self.root)
         with p.tx() as db:

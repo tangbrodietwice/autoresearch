@@ -50,15 +50,24 @@ with ExitStack() as stack:
     assert plan["workspace"]==""
     project=post("workspace",name="CTR",repo="mock",baseline="v1",dataset="mock-v1",train="mock",evaluate="mock",mode="hybrid",training_host="gpu",delivery="git",floor=.715)
     post("attach",id=plan["id"],workspace=project["id"])
-    post("start",id=plan["id"],budget=2)
+    post("start",id=plan["id"],budget=2,design="固定数据后验证平滑是否改善低频 CTR")
     for _ in range(100):
         data=json.loads(fetch("/v1/state")[0])
         if data["task"][0]["status"]=="completed": break
         time.sleep(.1)
     assert len(data["experiment"])==2
+    report=data["plan"][0]["report"]
+    assert report["goal"]=="固定数据后验证平滑是否改善低频 CTR" and len(report["runs"])==2
+    assert report["agent"]["version"]==1 and report["baseline_value"] is not None
+    assert {"preparing","submitting","waiting","analyzing","finished"} <= {p["phase"] for p in data["progress"]}
+    follow=post("skill",name="固定评测协议",markdown="# 先冻结数据划分",agent="worker")
+    after=json.loads(fetch("/v1/state")[0])
+    assert follow["id"] in next(a for a in after["agent"] if a["id"]=="worker")["skills"]
+    assert follow["id"] not in after["task"][0]["agent"]["skills"]
+    assert after["plan"][0]["report"]["agent"]["version"]==1
     assert post("decision",id=plan["id"],value="保留候选")["decision"]=="保留候选"
     assert json.loads(fetch("/v1/state")[0])["plan"][0]["decision"]=="保留候选"
-    print("PASS Web origin: assets, chat → unassigned draft → project → two experiments → decision")
+    print("PASS Web origin: discussion design, worker phases, report, decision, and Skill version isolation")
 
     assert not json.loads(fetch("/v1/state")[0])["integration"]
     other=post("plan",title="补充 CTR 研究",direction="对照另一组设定",workspace=project["id"])
@@ -68,6 +77,7 @@ with ExitStack() as stack:
         item=next(t for t in data["task"] if t["plan"]==other["id"])
         if item["status"]=="completed": break
         time.sleep(.1)
+    assert follow["id"] in item["agent"]["skills"] and item["agent"]["version"]==2
     post("decision",id=other["id"],value="保留候选")
     payload=dict(workspace=project["id"],revision="a"*40,plans=[plan["id"],other["id"]],
                  metrics={"low_freq_auc":.68,"overall_auc":.72},summary="合并版本的固定协议评测")

@@ -5,7 +5,7 @@ app="${1:-$PWD/.build/TripSci.app}"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/backend"
 mkdir -p .build/module-cache
 /usr/bin/swiftc -module-cache-path "$PWD/.build/module-cache" -O -parse-as-library -target "$(uname -m)-apple-macosx14.0" macos/TripSci.swift -o "$app/Contents/MacOS/TripSci"
-cp backend/{app,native_api,iris}.py "$app/Contents/Resources/backend/"
+cp backend/{app,native_api,iris,beans,name_llm}.py "$app/Contents/Resources/backend/"
 cp -R backend/datasets "$app/Contents/Resources/backend/"
 cp macos/TripSci-icon.png "$app/Contents/Resources/"
 iconset="$(mktemp -d)"

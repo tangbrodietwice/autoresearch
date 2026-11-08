@@ -13,6 +13,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from native_api import WorkspaceAPI
 import iris
+import beans
+import name_llm
 
 BASE = Path(__file__).resolve().parent
 SEED = {"low_freq_auc": .65, "overall_auc": .72}
@@ -114,13 +116,13 @@ class TaskManager:
     def __init__(self, project):
         self.p = project
 
-    def create(self, db, goal, budget):
-        if not isinstance(goal, str) or not goal.strip() or len(goal)>500 or type(budget) is not int or not 1<=budget<=10:
-            raise ValueError("Provide a goal and an experiment budget from 1 to 10.")
+    def create(self, db, goal, budget, cap=10):
+        if not isinstance(goal, str) or not goal.strip() or len(goal)>500 or type(budget) is not int or not 1<=budget<=cap:
+            raise ValueError("Provide a goal and an experiment valid experiment budget.")
         key = uuid.uuid4().hex[:12]
         task = {"id": key, "goal": goal.strip(), "max_experiments": budget,
                 "constraints": dict(CONSTRAINTS), "settings": self.p.get(db, "settings", "active"),
-                "status": "ready", "round": 0, "best": SEED, "pending_job": None}
+                "status": "ready", "round": 0, "best": SEED, "pending_job": None, "phase": "scheduled"}
         self.save(db, task, "Task contract approved")
         return key
 
@@ -128,7 +130,7 @@ class TaskManager:
         self.p.put(db, "task", task["id"], task)
         key = uuid.uuid4().hex
         self.p.put(db, "progress", key, {"task": task["id"], "round": task["round"],
-                   "state": task["status"], "event": event, "time": time.time()})
+                   "state": task["status"], "phase": task.get("phase"), "event": event, "time": time.time()})
 
     def feedback(self, db, key, message):
         task = self.p.get(db, "task", key)
@@ -145,27 +147,68 @@ class TaskManager:
         self.save(db, task, f"Inbox: {message}")
 
     def tick(self, runtime):
-        ready = []
+        ready, launches = [], []
+        now = time.time()
         with self.p.tx() as db:
             for task in self.p.all(db, "task"):
                 if task["status"] in ("waiting","paused") and task.get("pending_job"):
                     job = self.p.get(db, "job", task["pending_job"])
-                    result = job.get("result") or MockTraining.poll(job, time.time())
+                    if job.get("adapter") in ("beans","name-llm"):
+                        receipt = self.p.root / "training" / job["id"] / "result.json"
+                        if not receipt.exists():
+                            launches.append((task["workspace"],job["id"],job["adapter"]))
+                            continue
+                        payload = json.loads(receipt.read_text())
+                        if payload.get("error"):
+                            task.update(status="failed",phase="failed",failure="本机训练失败："+payload["error"])
+                            self.save(db,task,"Local training failed")
+                            continue
+                        if now < job["ready_at"]:
+                            continue
+                        job.update(training_started_at=payload["started_at"],training_ended_at=payload["ended_at"])
+                        result = payload["metrics"]
+                    else:
+                        result = job.get("result") or MockTraining.poll(job, now)
                     if result is not None and ("result" not in job or task["status"]=="waiting"):
                         job["result"] = result
                         self.p.put(db, "job", job["id"], job)
                         if task["status"]=="waiting":
-                            task["status"] = "ready"
+                            task.update(status="ready", phase="analyzing")
                         self.save(db, task, "Training result available")
-                if task["status"] == "ready":
-                    ready.append(task["id"])
-        for key in ready:
-            runtime.run(key)
+                if task["status"] == "ready" and (task.get("pending_job") or now >= task.get("not_before",0)):
+                    ready.append((task.get("last_dispatched",0),task["id"]))
+        for workspace, job_id, adapter in launches:
+            runtime.launch_training(workspace,job_id,adapter)
+        for _, key in sorted(ready):
+            with self.p.tx() as db:
+                task = self.p.get(db, "task", key)
+                if task["status"] != "ready":
+                    continue
+                if not task.get("queued") or task.get("pending_job"):
+                    task["phase"] = "analyzing" if task["pending_job"] else "preparing"
+                    self.save(db, task, "Worker is analyzing results" if task["pending_job"] else "Worker is preparing code")
+            try:
+                runtime.run(key)
+            except (OSError, subprocess.SubprocessError):
+                with self.p.tx() as db:
+                    task = self.p.get(db, "task", key)
+                    if task["status"] == "ready":
+                        task.update(status="failed", phase="failed",
+                                    failure="Worker 未能完成当前步骤。请检查执行环境后重试。")
+                        self.save(db, task, "Worker execution failed")
 
 
 class RuntimeAdapter:
     def __init__(self, root):
         self.root = root
+        self.training = {}
+
+    def launch_training(self, workspace, job_id, adapter):
+        self.training = {k:p for k,p in self.training.items() if p.poll() is None}
+        if job_id not in self.training:
+            self.training[job_id] = subprocess.Popen(
+                [sys.executable,str(BASE/"beans.py"),str(self.root),workspace,job_id,adapter],
+                stdin=subprocess.DEVNULL,start_new_session=True)
 
     def run(self, key):
         subprocess.run([sys.executable, str(BASE/"app.py"), "--state", str(self.root), "--worker", key],
@@ -196,12 +239,27 @@ class ResearchWorker:
             if task.get("workspace"):
                 self.p.repo = self.p.root / "projects" / task["workspace"]
                 self.p.bootstrap()
-            real = task.get("environment",{}).get("adapter")=="iris"
+            adapter = task.get("environment",{}).get("adapter")
+            real = adapter == "iris"
+            bean = adapter == "beans"
+            ntl = adapter == "name-llm"
             primary=task["constraints"]["primary_metric"]
             guardrail=task["constraints"].get("guardrail_metric","overall_auc")
             if real and not (self.p.repo/"data/iris.json").exists():
                 self.p.write("data/iris.json",iris.dataset())
                 self.p.commit("Lock UCI Iris data and split")
+            if bean and not (self.p.repo/"data/dry-bean.csv.gz").exists():
+                target = self.p.repo/"data/dry-bean.csv.gz"
+                target.parent.mkdir(exist_ok=True)
+                temp=target.with_suffix(".tmp")
+                temp.write_bytes((BASE/"datasets/dry-bean.csv.gz").read_bytes())
+                temp.replace(target)
+                self.p.write("evaluation/beans-protocol.json",{"sha256":beans.dataset()["sha256"],"seed":602,
+                             "baseline":beans.BASELINE,"split":["train","validation","test"]})
+                self.p.commit("Lock UCI Dry Bean data and evaluation protocol")
+            if ntl and not (self.p.repo/"evaluation/name-llm-protocol.json").exists():
+                self.p.write("evaluation/name-llm-protocol.json",task["environment"]["manifest"])
+                self.p.commit("Lock Name That LLM prompt split protocol")
             feedback = []
             for item in self.p.all(db, "inbox"):
                 if item["task"] == key and not item["consumed"]:
@@ -215,39 +273,52 @@ class ResearchWorker:
                             and result[primary] > task["best"][primary])
                 report = f"reports/{job['id']}.md"
                 self.p.write(report, f"# Round {task['round']}\n\nRevision: {job['revision']}\n\n"
-                             f"Strength: {job['strength']}\n\nMetrics: {result}\n\n"
+                             f"Configuration: {job.get('config',job['strength'])}\n\nMetrics: {result}\n\n"
                              f"Decision: {'adopt' if accepted else 'retain prior baseline'}\n")
+                reference = task.get("baseline_metrics", {}).get(primary)
                 record = {**job, "task": key, "round": task["round"], "accepted": accepted,
                           "guardrail_passed": result[guardrail] >= task["constraints"]["overall_auc_floor"],
+                          "baseline_delta": round(result[primary]-reference, 6) if reference is not None else None,
                           "report": report, "report_commit": self.p.commit(f"Record {job['id']}")}
                 self.p.put(db, "experiment", job["id"], record)
                 if accepted:
                     task["best"] = {**result, "strength": job["strength"], "revision": job["revision"]}
                     if real: task["best"].update(k=job["k"],scale=job["scale"])
+                    if bean or ntl: task["best"]["config"] = job["config"]
                 task["pending_job"] = None
                 self.manager.save(db, task, f"Analyzed {job['id']}: {'adopted' if accepted else 'rejected'}")
-            if task["round"] >= task["max_experiments"]:
-                task["status"] = "completed"
+            if not task.get("continuous") and task["round"] >= task["max_experiments"]:
+                task.update(status="completed", phase="finished")
                 for item in feedback:
                     item.update(consumed=True, disposition="预算已用完")
                     self.p.put(db,"inbox",item["id"],item)
                 self.manager.save(db, task, "Experiment budget exhausted")
                 return
+            if task.get("continuous") and task["round"] and not task.get("pending_job") and task.get("cooldown_round") != task["round"]:
+                task.update(not_before=time.time()+task["interval"],cooldown_round=task["round"],phase="cooldown")
+                self.manager.save(db,task,"Waiting for next iteration window")
+                return
             slots = self.p.get(db,"settings","active").get("slots",2)
             occupied = 0
             for other in self.p.all(db,"task"):
-                if other["id"] != key and other.get("pending_job"):
+                if other["id"] != key and other.get("pending_job") and other["status"]!="failed":
                     active = self.p.get(db,"job",other["pending_job"])
-                    occupied += bool(active and MockTraining.poll(active,time.time()) is None)
+                    occupied += bool(active and not active.get("result") and (active.get("adapter") in ("beans","name-llm") or MockTraining.poll(active,time.time()) is None))
             if occupied >= slots:
                 if not task.get("queued"):
-                    task["queued"]=True
+                    task.update(queued=True, phase="queued")
                     self.manager.save(db,task,"Waiting for a training slot")
                 return
             task.pop("queued",None)
             tried = [e["strength"] for e in self.p.all(db, "experiment") if e["task"] == key]
             conservative = task.get("conservative", False) or "wide-search" not in task["settings"]["skills"]
-            if real:
+            if ntl:
+                candidate=name_llm.propose(task["strategy"],task["round"]+1,task["best"])
+                strength=0
+            elif bean:
+                candidate=beans.propose(task["strategy"],task["round"]+1,task["best"])
+                strength=0
+            elif real:
                 tried_pairs=[(e["k"],e["scale"]) for e in self.p.all(db,"experiment") if e["task"]==key]
                 k,scale=iris.choose(tried_pairs,task["best"])
                 strength=0
@@ -258,8 +329,8 @@ class ResearchWorker:
                 message = item["message"]
                 match = re.search(r"(?:强度|strength)\s*[:：]?\s*(0(?:\.\d+)?|1(?:\.0+)?)(?![.\d])",message)
                 disposition = "已读取，模拟 Worker 未识别为实验指令"
-                if real:
-                    disposition = "已读取：Iris 使用固定 kNN 搜索协议"
+                if real or bean or ntl:
+                    disposition = "已读取：当前使用已锁定的实验策略"
                 elif match:
                     value = float(match[1])
                     if value not in tried and (not conservative or value <= .65):
@@ -275,19 +346,26 @@ class ResearchWorker:
                 self.p.put(db,"inbox",item["id"],item)
             task["round"] += 1
             jobid = f"{key}-{task['round']}"
-            if real:
+            if bean or ntl:
+                self.p.write(f"models/{jobid}.json",candidate)
+            elif real:
                 self.p.write(f"models/{jobid}.json",{"k":k,"scale":scale})
             else:
                 self.p.write(f"models/{jobid}.py", f"STRENGTH = {strength}\n\ndef smooth(raw, prior):\n    return (1-STRENGTH)*raw + STRENGTH*prior\n")
             revision = self.p.commit(f"Prepare {jobid}")
-            job = MockTraining.submit(jobid, revision, strength, task["settings"]["delay"])
+            task["phase"] = "submitting"
+            self.manager.save(db, task, f"Submitting {jobid}")
+            if bean or ntl:
+                job = dict(id=jobid,revision=revision,strength=0,adapter=adapter,config=candidate,ready_at=time.time()+1)
+            else:
+                job = MockTraining.submit(jobid, revision, strength, task["settings"]["delay"])
             job.update(task=key,dataset=task["constraints"]["dataset"],
                        mode=task.get("environment",{}).get("mode","local"))
             if real:
                 data=json.loads((self.p.repo/"data/iris.json").read_text())
                 job.update(k=k,scale=scale,measured=iris.evaluate(data,k,scale))
             self.p.put(db, "job", jobid, job)
-            task.update(status="waiting", pending_job=jobid)
+            task.update(status="waiting", pending_job=jobid, phase="waiting",last_dispatched=time.time())
             self.manager.save(db, task, f"Submitted {jobid}; worker exits")
 
 
