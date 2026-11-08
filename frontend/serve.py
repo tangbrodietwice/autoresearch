@@ -1,5 +1,6 @@
 """Serve the web client and relay its API requests to the separate backend."""
 import argparse
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -7,6 +8,7 @@ from urllib.request import Request, urlopen
 
 
 ASSETS = {"/": ("index.html","text/html; charset=utf-8"),
+          "/markdown-it.min.js": ("markdown-it.min.js","text/javascript; charset=utf-8"),
           "/workspace.js": ("workspace.js","text/javascript; charset=utf-8"),
           "/TripSci-icon.png": ("TripSci-icon.png","image/png")}
 API = {"/v1/state", "/v1/action"}
@@ -42,9 +44,17 @@ class Handler(BaseHTTPRequestHandler):
     def proxy(self, data=None):
         if self.path not in API:
             return self.respond(404, "application/json", b'{"error":"Not found"}')
+        timeout = 10
+        if data is not None:
+            try:
+                request = json.loads(data)
+                if isinstance(request, dict) and request.get("op") == "message":
+                    timeout = 95
+            except (ValueError, UnicodeError):
+                pass
         try:
             with urlopen(Request(self.server.backend+self.path, data=data,
-                         headers={"Content-Type":"application/json"}), timeout=10) as r:
+                         headers={"Content-Type":"application/json"}), timeout=timeout) as r:
                 self.respond(r.status, r.headers["Content-Type"], r.read())
         except HTTPError as exc:
             self.respond(exc.code, exc.headers["Content-Type"], exc.read())

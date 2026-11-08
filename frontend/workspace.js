@@ -9,7 +9,9 @@ let needsRender=false, toolTab='我的工具', agentTab='概览', returnPlan='';
 const resultFilters={}, openPlanStatus=new Set();
 const chartChoices={};
 const metricNames={balanced_accuracy:'Balanced Accuracy',macro_f1:'Macro F1',accuracy:'准确率',low_freq_auc:'低频 AUC',overall_auc:'整体 AUC'};
-const runtimeName=r=>all('runtimes').find(x=>x.id===r)?.name||r;
+const runtimeName=r=>r==='local-process'?'TripSci 内置执行器':all('runtimes').find(x=>x.id===r)?.name||r;
+const externalRuntimes=()=>all('runtimes').filter(r=>r.id!=='local-process');
+const supervisorStatus=a=>a.runtime_detected?'已检测 Codex':'未检测到 Codex';
 const runtimeStatus=r=>r?.installed?(r.executable?'可运行':'已检测 · 仅配置'):'未安装';
 const navHeading=(crumb,actions='')=>'<header class="head"><div class="flex breadcrumb">'+crumb+'</div><div class="flex">'+actions+'</div></header>';
 const search=(placeholder)=>'<input class="control search" data-search placeholder="'+E(placeholder)+'" aria-label="'+E(placeholder)+'" type="search">';
@@ -43,7 +45,7 @@ async function load(){
  finally{refreshing=false}
 }
 const pendingActions=new Map();
-async function act(payload,done=()=>{}){
+async function act(payload,done=()=>{},onError=null){
  if(busy)return;
  busy=true;epoch++;
  const err=$('#modal .submit-error');
@@ -55,7 +57,8 @@ async function act(payload,done=()=>{}){
  try{
    row=await api('/v1/action',{...payload,request_key:key});
  }catch(e){
-   if(err&&$('#modal').open)err.textContent=e.message;
+   if(onError)onError(e.message);
+   else if(err&&$('#modal').open)err.textContent=e.message;
    else notice(e.message);
    busy=false;
    return;
@@ -92,7 +95,16 @@ const projectIcon=()=>'<span class="project-icon">'+icon('project')+'</span>';
 let recentViews=[];
 try{recentViews=JSON.parse(localStorage.getItem('tripsci-recent')||'[]')}catch{}
 let projectsExpanded=true;
-let chatMode='chat', draftProject='';
+const chatTurns=new Map();
+try{
+ for(const turn of JSON.parse(sessionStorage.getItem('tripsci-chat-turns')||'[]')){
+   chatTurns.set(turn.page+turn.id,turn);
+   page=turn.page;id=turn.id;
+ }
+}catch{}
+function saveChatTurns(){
+ try{sessionStorage.setItem('tripsci-chat-turns',JSON.stringify([...chatTurns.values()]))}catch{}
+}
 function rememberView(kind,key){
  if(!key||!['聊天','研究计划'].includes(kind))return;
  recentViews=[{kind,key},...recentViews.filter(x=>x.kind!==kind||x.key!==key)].slice(0,12);
@@ -127,7 +139,8 @@ function sidebar(){
    return row?sideButton(row.title||row.name,action,key,icon(glyph),page===kind&&id===key):'';
  }).filter(Boolean).slice(0,8);
  return '<nav class="primary-nav" aria-label="一级导航">'+rail+'</nav><div class="workspace-nav"><div class="brand">'+mark+'TripSci</div><nav aria-label="工作区">'+
- sideButton('新聊天','newChat','',icon('chat'),page==='聊天'&&!id)+'</nav>'+
+ sideButton('新聊天','newChat','',icon('chat'),page==='聊天'&&!id)+
+ sideButton('新研究计划','newPlan','',icon('plans'),false)+'</nav>'+
  '<section class="project-section" aria-label="项目"><div class="project-heading">'+sideButton('项目','nav','项目','',page==='项目'&&!id)+
  '<button type="button" class="quiet project-add" aria-label="新建项目" title="新建项目" data-act="newProject">＋</button>'+
  (projects?'<button type="button" class="quiet project-expand" aria-label="'+(projectsExpanded?'收起所有项目':'展开所有项目')+'" aria-controls="project-tree" aria-expanded="'+projectsExpanded+'" data-act="toggleProjects">'+(projectsExpanded?'⌄':'›')+'</button>':'')+
@@ -135,36 +148,134 @@ function sidebar(){
  '<section class="recent-section" aria-label="最近"><h4>最近</h4>'+
  '<div class="recent-items">'+recent.join('')+'</div></section></div>';
 }
+const proposalFields={
+ name:'名称',title:'标题',repo:'代码地址',baseline:'基线',dataset:'数据版本',train:'训练入口',evaluate:'评测入口',
+ mode:'执行模式',floor:'评测护栏',training_host:'训练服务器',delivery:'代码交付方式',agent_host:'智能体服务器',
+ remote_dir:'远端目录',direction:'研究方向',workspace:'所属项目',design:'实验设计',budget:'实验轮数',
+ agent:'执行智能体',strategy:'实验策略',research_mode:'研究决策方式',run_mode:'运行方式',interval:'轮次间隔（秒）',
+ text:'反馈',markdown:'Skill 内容',instructions:'智能体指令',runtime:'运行时',skills:'Skills',delay:'模拟训练时长（秒）',slots:'并发上限'
+};
+function proposalSummary(proposal){
+ const kind={workspace:'workspace',agent:'agent'}[proposal.operation]||'plan';
+ return Object.entries(proposal.payload).map(([key,value])=>{
+   const resource={id:kind,workspace:'workspace',agent:'agent'}[key];
+   const row=resource&&get(resource,value);
+   const display=row?.name||row?.title||(key==='mode'?modeNames[value]:undefined)||
+     (key==='run_mode'?{bounded:'固定轮次',continuous:'持续迭代'}[value]:undefined)||
+     (Array.isArray(value)?value.map(id=>get('skill',id)?.name||id).join('、'):String(value??''));
+   return '<dt>'+E(key==='agent'&&proposal.operation==='skill'?'分配给':key==='id'?{workspace:'目标项目',agent:'目标智能体',plan:'目标研究计划'}[kind]:proposalFields[key]||key)+
+     '</dt><dd>'+E(display)+'</dd>';
+ }).join('');
+}
+function supervisorProposal(proposal){
+ if(!proposal)return '';
+ const pending=proposal.status==='pending';
+ const effect=proposal.operation==='workspace'&&!proposal.payload.id
+   ?'确认后将在 TripSci 项目存储中创建专属目录并保存配置。'
+   :'确认后按工作区规则校验并执行。';
+ return '<section class="supervisor-proposal" aria-label="主管提案"><div class="flex spread"><strong>'+E(proposal.label)+'</strong>'+
+   label(pending?'待确认':proposal.status==='cancelled'?'已取消':'已执行')+'</div><dl class="proposal-fields">'+proposalSummary(proposal)+'</dl>'+
+   (pending?'<p class="muted">'+E(effect)+'</p>'+'<div class="flex">'+btn('取消','cancelSupervisor',false,proposal.id)+btn('确认执行','confirmSupervisor',true,proposal.id)+'</div>':'')+'</section>';
+}
+// markdown-it 15.0.3 is bundled locally so chat formatting also works offline.
+const messageMarkdown=window.markdownit?.({html:false,linkify:true,breaks:true}).disable('image');
+if(messageMarkdown){
+ messageMarkdown.validateLink=url=>/^https?:\/\//i.test(url);
+ messageMarkdown.renderer.rules.link_open=(tokens,index,options,env,self)=>{
+   tokens[index].attrSet('target','_blank');
+   tokens[index].attrSet('rel','noopener noreferrer');
+   return self.renderToken(tokens,index,options);
+ };
+ messageMarkdown.renderer.rules.table_open=()=>'<div class="message-table" tabindex="0" role="region" aria-label="消息表格"><table>';
+ messageMarkdown.renderer.rules.table_close=()=>'</table></div>';
+}
+function messageContent(message){
+ if(message.role==='agent'&&messageMarkdown){
+   return '<div class="rich-message">'+messageMarkdown.render(String(message.text??''))+'</div>';
+ }
+ return '<p>'+E(message.text)+'</p>';
+}
 function transcript(items){
- return items.map(m=>'<div class="msg '+(m.role==='user'?'user':m.role==='event'?'event':'agent')+'">'+(m.role==='agent'?'<span class="avatar">'+mark+'</span>':'')+'<div class="content"><p>'+E(m.text)+'</p></div></div>').join('');
+ return items.map(m=>'<div class="msg '+(m.role==='user'?'user':m.role==='event'?'event':'agent')+'">'+(m.role==='agent'?'<span class="avatar">'+mark+'</span>':'')+'<div class="content">'+messageContent(m)+supervisorProposal(m.proposal)+'</div></div>').join('');
 }
 function composer(hint,context=''){
- const key=page+id, newChat=page==='聊天'&&!id, planning=newChat&&chatMode==='plan';
- const mode=newChat?pick('聊天模式',[['chat','普通聊天'],['plan','新建研究计划']],chatMode):'';
- const project=planning?pick('计划所属项目',[['','稍后关联项目'],...all('workspace').map(w=>[w.id,w.name])],draftProject):'';
- return '<div class="compose"><form id="send"><textarea name="text" aria-label="消息" maxlength="'+(planning?'500':'4000')+'" placeholder="'+E(hint)+'" required>'+E(drafts[key])+'</textarea>'+
- '<div class="compose-footer"><div class="composer-options">'+mode+project+(!newChat?'<small>'+E(context)+'</small>':'')+'</div><button class="primary send" aria-label="'+(planning?'创建研究计划':'发送消息')+'">↑</button></div></form></div>';
+ const key=page+id, turn=chatTurns.get(key), pending=turn&&!turn.error;
+ return '<div class="compose"><form id="send"><textarea name="text" aria-label="消息" maxlength="4000" placeholder="'+E(hint)+'" required'+(pending?' disabled':'')+'>'+E(drafts[key])+'</textarea>'+
+ '<div class="compose-footer"><div class="composer-options">'+(context?'<small>'+E(context)+'</small>':'')+
+ '</div><button class="primary send" aria-label="发送消息"'+(pending?' disabled':'')+'>↑</button></div></form></div>';
+}
+function turnPreview(turn){
+ if(!turn)return '';
+ if(turn.editing)return '<form class="turn-edit" data-form="editChatTurn"><textarea aria-label="编辑消息" name="text" required maxlength="4000">'+E(turn.text)+'</textarea>'+
+ '<div class="flex">'+btn('取消','cancelChatEdit')+'<button class="primary">保存并重试</button></div></form>';
+ return transcript([{role:'user',text:turn.text}])+
+   (turn.error?'<div class="turn-actions"><button type="button" class="quiet" data-act="retryChatTurn" aria-label="重试" title="重试">↻</button>'+
+     '<button type="button" class="quiet" data-act="editChatTurn" aria-label="编辑消息" title="编辑消息">✎</button></div>':'')+
+   '<p class="chat-send-status" role="status">'+E(turn.error||turn.progress||'研发主管正在回复…')+'</p>';
+}
+async function runChatTurn(turn){
+ const key=turn.page+turn.id, visible=()=>page===turn.page&&id===turn.id;
+ const active=()=>chatTurns.get(key)===turn;
+ try{
+   const request={op:'message',background:true,text:turn.text,request_key:turn.requestKey,
+     [turn.page==='聊天'?'thread':'plan']:turn.id};
+   let response=await api('/v1/action',request);
+   while(response.status==='running'){
+     if(active()&&turn.progress!==response.progress){
+       turn.progress=response.progress;
+       if(visible())render();
+     }
+     await new Promise(resolve=>setTimeout(resolve,650));
+     response=await api('/v1/action',{op:'chat_status',request_key:turn.requestKey});
+   }
+   if(response.status==='failed'){
+     turn.finished=true;
+     throw new Error(response.error);
+   }
+   const result=response.result||response;
+   rememberView(turn.page,result.id);
+   if(active()){
+     chatTurns.delete(key);
+     if(visible())id=result.id;
+   }
+   try{S=await api('/v1/state')}catch{needsRender=true}
+   render();
+   if(page===turn.page&&id===result.id&&document.activeElement===document.body&&!$('#modal').open)$('#send textarea')?.focus({preventScroll:true});
+ }catch(error){
+   if(active()){
+     turn.error=error.message;
+     if(visible())render();
+   }
+ }finally{saveChatTurns()}
+}
+function startChatTurn(text,requestKey=crypto.randomUUID()){
+ const key=page+id, turn={text,page,id,requestKey};
+ chatTurns.set(key,turn);
+ delete drafts[key];
+ saveChatTurns();
+ render();
+ const conversation=$('#main .conversation');
+ if(conversation)conversation.scrollTop=conversation.scrollHeight;
+ return runChatTurn(turn);
 }
 function chat(){
  const t=get('thread',id);
- if(!t){
-   const planning=chatMode==='plan';
-   return '<div class="chat-home"><div class="chat-start">'+mark+'<h1>'+(planning?'想研究什么？':'今天想聊什么？')+'</h1>'+
-   composer(planning?'写下要验证的想法…':'自由讨论想法、进展或 Skills…')+
-   (planning?'<div class="existing-plans">'+btn('查看已有研究计划','allPlans')+'</div>':'')+'</div></div>';
- }
- return head(t.title,btn('创建研究计划','newPlan'))+'<div class="dialogue chat-thread"><div class="conversation"><div class="inner">'+transcript(t.messages)+'</div></div>'+composer('继续聊天…')+'</div>';
+ const draft=chatTurns.get(page+id);
+ if(!t&&!draft)return '<div class="chat-home"><div class="chat-start">'+mark+'<h1>今天想聊什么？</h1>'+
+   composer('自由讨论想法、进展或 Skills…')+'</div></div>';
+ return head(t?.title||'新聊天')+'<div class="dialogue chat-thread"><div class="conversation"><div class="inner">'+transcript(t?.messages||[])+turnPreview(draft)+'</div></div>'+composer('继续聊天…')+'</div>';
 }
 function planRow(p){return '<button type="button" class="listrow" data-act="plan" data-key="'+E(p.id)+'"><span class="mono">'+E(p.id.slice(0,7))+'</span><strong>'+E(p.title)+'</strong><small class="projectCol">'+E(get('workspace',p.workspace)?.name||'未关联项目')+'</small>'+label(state(p))+'</button>'}
 function metrics(r){return Object.entries(r||{}).map(([k,v])=>E(metricNames[k]||k)+' '+E(v)).join(' · ')}
-const configLabel=e=>e.adapter==='name-llm'&&e.config?'词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
+const configLabel=e=>e.adapter==='name-llm'&&e.config?(e.config.classifier==='multinomial_nb'?'多项式朴素贝叶斯':'余弦质心')+' · 词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
 const shortScore=(e,k)=>Number.isFinite(e.result?.[k])?(metricNames[k]||k)+' '+e.result[k].toFixed(4):'暂无指标';
 const delta=e=>Number.isFinite(e.baseline_delta)?' · 较基线 '+(e.baseline_delta>=0?'+':'')+e.baseline_delta.toFixed(4):'';
-const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',finished:'实验已结束'};
+const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',research_decision:'Codex 正在检索历史并作出研究决策',finished:'实验已结束'};
 function workerStage(t,job){
  if(t.status==='paused')return '暂停后续调度';
  if(t.status==='failed')return '执行失败';
  if(t.status==='completed')return phases.finished;
+ if(t.phase==='research_decision')return phases.research_decision;
  if(t.phase==='training_retry')return phases.training_retry;
  if(job)return job.result?'分析实验结果':['beans','name-llm'].includes(job.adapter)?'本机训练或等待结果':phases.waiting;
  return phases[t.phase]||'等待调度';
@@ -192,12 +303,21 @@ function analyzeRun(e,t){
 }
 function runAnalysis(e,t,compact=false){
  const a=analyzeRun(e,t);
- return '<div class="run-analysis">'+(!compact&&a.objective?'<p><strong>研究目标</strong> '+E(a.objective)+'</p>':'')+
+ const proposal=e.research_proposal, analysis=e.research_analysis;
+ return '<div class="run-analysis">'+(proposal?'<p><strong>假设</strong> '+E(proposal.hypothesis)+'</p>'+(proposal.objective_alignment?'<p><strong>与目标的关系</strong> '+E(proposal.objective_alignment)+'</p>':'')+'<p><strong>预期与反证</strong> '+E(proposal.expected)+' · '+E(proposal.disconfirming_result)+'</p><p><strong>选择依据</strong> '+E(proposal.rationale)+(proposal.history_refs.length?' · '+E(proposal.history_refs.join('、')):'')+'</p>':'')+
+ (analysis?'<p><strong>Agent 分析</strong> '+E(analysis.observations)+'</p><p><strong>替代解释</strong> '+E(analysis.alternative_explanation)+'</p><p><strong>下一步</strong> '+E(analysis.next_step)+'</p>':'')+(!compact&&a.objective?'<p><strong>研究目标</strong> '+E(a.objective)+'</p>':'')+
  '<p><strong>本轮验证</strong> '+E(a.what)+'</p><p><strong>结论</strong> '+E(a.conclusion)+'</p><p><strong>是否符合预期</strong> '+E(a.expectation)+'</p></div>';
+}
+function runDiagnostics(e){
+ if(!e.diagnostics)return '';
+ const elapsed=e.training_ended_at-e.training_started_at;
+ return '<p>按 '+E(e.diagnostics.group_key)+' 分组 · 切分种子 '+E(e.diagnostics.split_seed)+
+   (Number.isFinite(elapsed)?' · 评测耗时 '+elapsed.toFixed(2)+' 秒':'')+'</p><ul>'+
+   Object.entries(e.diagnostics.recalls).map(([name,{correct,total}])=>'<li>'+E(name)+' '+correct+' / '+total+'</li>').join('')+'</ul>';
 }
 function experiment(e,t){
  return '<article class="rail-result"><div class="flex spread"><strong>第 '+e.round+' 轮</strong>'+label(outcome(e))+'</div>'+runAnalysis(e,t,true)+
- '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p><p class="mono">提交 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details></article>';
+ '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p>'+runDiagnostics(e)+'<p class="mono">提交 '+E(e.revision)+'<br>报告 '+E(e.report)+(e.run_path?'<br>运行目录 '+E(e.run_path):'')+'</p></details></article>';
 }
 function rail(p){
  const t=task(p), env=t?.environment||get('workspace',p.workspace), job=t&&get('job',t.pending_job), ex=planRuns(p);
@@ -210,18 +330,39 @@ function rail(p){
  if(t.status==='failed'){
    out+='<section><h3>恢复执行</h3><p>'+E(t.failure)+'</p>'+(t.failure_info?.log?'<small>日志 '+E(t.failure_info.log)+'</small>':'')+btn('重试执行','retryPlan',true)+'</section>';
  }else if(t.status!=='completed'){
-   out+='<section><h3>进行中的实验</h3>'+(job?'<div class="runbox"><strong>第 '+t.round+' 轮 · '+E(job.result?'结果已返回':job.k||['beans','name-llm'].includes(job.adapter)?'本机评测':'模拟训练')+'</strong><p>'+E(configLabel(job))+'</p></div>':'<p class="muted">'+E(stage)+'，尚无已提交的实验。</p>')+
+   out+='<section><h3>执行控制</h3>'+
    '<div class="flex">'+btn(t.status==='paused'?'恢复调度':'暂停后续调度',t.status==='paused'?'resume':'pause')+btn('给 Worker 反馈','feedback')+(t.continuous?btn('结束并生成报告','finishLoop'):'')+'</div></section>'+
-   '<section><h3>待安排</h3><p>'+(t.continuous?'每轮结束后等待 '+t.interval+' 秒，再自动提出下一轮。':'还有 '+Math.max(0,t.max_experiments-t.round)+' 轮未提交。')+'</p>'+all('inbox').filter(x=>x.task===t.id&&!['pause','resume'].includes(x.message)).map(x=>'<p>'+label(x.consumed?(x.disposition||'已读取'):'已送达')+' '+E(x.message)+'</p>').join('')+'</section>';
+   '<section><h3>待安排</h3><p>'+(t.continuous?'每轮结束后等待 '+t.interval+' 秒，再自动提出下一轮。':'还有 '+Math.max(0,t.max_experiments-t.round)+' 轮未提交。')+'</p></section>';
  }
- return out+'<section><h3>已完成实验</h3>'+(ex.slice().sort((a,b)=>b.round-a.round).map(e=>experiment(e,t)).join('')||'<p class="muted">首轮评测完成后显示摘要。</p>')+'</section>';
+ return out;
 }
+function researchActivity(p){
+ const t=task(p);
+ if(!t)return '';
+ let content=reportCard(p);
+ if(!content){
+   const job=get('job',t.pending_job);
+   const completed=planRuns(p).slice().sort((a,b)=>a.round-b.round);
+   const feedback=all('inbox').filter(x=>x.task===t.id&&!['pause','resume'].includes(x.message));
+   content=(job?'<p><strong>进行中的实验</strong> · 第 '+t.round+' 轮</p><p>'+E(configLabel(job))+'</p>':'')+
+     (completed.length?'<details data-detail="plan-run-history"><summary>逐轮结果与复现信息</summary>'+
+       completed.map(e=>experiment(e,t)).join('')+'</details>':'')+
+     feedback.map(x=>'<p>'+label(x.consumed?(x.disposition||'已读取'):'已送达')+' '+E(x.message)+'</p>').join('');
+ }
+ return content?'<div class="msg agent research-update"><span class="avatar">'+mark+'</span><div class="content">'+content+'</div></div>':'';
+}
+
 function reportText(r){
- const summaries=r.runs.map(e=>{
+ const summaries=r.runs.flatMap(e=>{
    const a=analyzeRun(e,{goal:r.goal,constraints:{primary_metric:r.primary}});
-   return '- 第 '+e.round+' 轮：'+a.what+'。'+a.conclusion+' '+a.expectation+' 证据 '+e.revision;
+   const p=e.research_proposal, v=e.research_analysis;
+   return ['','### 第 '+e.round+' 轮',a.what+'。'+a.conclusion,
+     ...(p?['- 假设：'+p.hypothesis,'- 目标关系：'+(p.objective_alignment||r.goal),'- 预期：'+p.expected,'- 反证：'+p.disconfirming_result,
+            '- 选择依据：'+p.rationale+'（'+(p.history_refs.join('、')||'初始假设')+'）']:[]),
+     ...(v?['- 观察：'+v.observations,'- 替代解释：'+v.alternative_explanation,'- 下一步：'+v.next_step]:[]),
+     '- 复现：'+e.revision+' · '+(e.run_path||e.report)];
  });
- return ['# '+r.title,'','## 实验设计',r.goal,'','基线：'+r.baseline+' · 数据：'+r.dataset,'Worker：'+r.agent.name+' v'+r.agent.version,'结论：'+(r.decision||(r.candidate?'有待评审候选':'没有达到采纳条件的候选')),'','## 实验结果',...summaries,...(r.holdout?['','## 保留测试集','基线：'+JSON.stringify(r.holdout.baseline),...(r.holdout.candidate?['候选：'+JSON.stringify(r.holdout.candidate)]:[])]:[])].join('\n');
+ return ['# '+r.title,'','## 实验设计',r.goal,'','基线：'+r.baseline+' · 数据：'+r.dataset,'Worker：'+r.agent.name+' v'+r.agent.version,'结论：'+(r.decision||(r.candidate?'有待评审候选':'没有达到采纳条件的候选')),'','## 实验结果',...summaries,...(r.research_summary?['','## 研究结论',r.research_summary.findings,'','## 局限',r.research_summary.limitations,'','## 后续验证',r.research_summary.next_steps]:[]),...(r.holdout?['','## 保留测试集','基线：'+JSON.stringify(r.holdout.baseline),...(r.holdout.candidate?['候选：'+JSON.stringify(r.holdout.candidate)]:[])]:[])].join('\n');
 }
 function reportCard(p){
  const r=p.report;if(!r)return '';
@@ -235,8 +376,9 @@ function reportCard(p){
      change<0?'验证集上的提升未在保留测试集复现。':'候选在保留测试集上与基线持平。';
  }
  return '<article class="research-report" aria-label="实验报告"><div class="flex spread"><h2>实验报告</h2></div>'+
- '<p>'+E(r.goal)+'</p><p>完成 '+r.runs.length+' / '+r.budget+' 轮 · '+bad+' 轮未通过护栏</p><p>基线：'+E(r.baseline)+(Number.isFinite(r.baseline_value)?' · '+E(metricNames[r.primary]+' '+r.baseline_value.toFixed(4)):'')+'</p>'+
+ '<p>完成 '+r.runs.length+' / '+r.budget+' 轮 · '+bad+' 轮未通过护栏</p><p>基线：'+E(r.baseline)+(Number.isFinite(r.baseline_value)?' · '+E(metricNames[r.primary]+' '+r.baseline_value.toFixed(4)):'')+'</p>'+
  '<p><strong>'+E(r.candidate?'最佳候选：第 '+r.candidate.round+' 轮 · '+shortScore(r.candidate,r.primary)+delta(r.candidate):'没有超过基线且通过护栏的候选。')+'</strong></p>'+
+ (r.research_summary?'<section><h3>研究结论</h3><p>'+E(r.research_summary.findings)+'</p><h3>局限</h3><p>'+E(r.research_summary.limitations)+'</p><h3>后续验证</h3><p>'+E(r.research_summary.next_steps)+'</p></section>':'')+
  '<details><summary>逐轮结果与复现信息</summary>'+r.runs.map(e=>experiment(e,task(p))).join('')+'</details>'+
  (r.holdout?'<p>保留测试集 · 基线：'+metrics(r.holdout.baseline)+(r.holdout.candidate?'<br>候选：'+metrics(r.holdout.candidate):'')+(holdoutConclusion?'<br><strong>'+E(holdoutConclusion)+'</strong>':'')+'</p>':'')+
  (p.decision?'<p>结论：'+E(p.decision)+'</p>':'<div class="flex report-actions">'+(r.candidate?btn('保留候选','decision',true,'保留候选'):'')+btn('不采用','decision',false,'不采用')+'</div>')+
@@ -246,9 +388,9 @@ function updateRail(){const p=get('plan',id), old=$('.rail');if(!p||!old)return;
 const researchTabs=active=>tabs(['研究计划','实验记录'],active,'researchTab');
 const planGroups=['计划中','进行中','待评审','已暂停','执行失败','已完成'];
 function plans(){
- const p=get('plan',id), list=all('plan').slice().reverse(), create=btn('＋ 新建计划','newPlan',true);
+ const p=get('plan',id), list=all('plan').slice().reverse(), create=btn('＋ 新研究计划','newPlan',true);
  if(!p){
-   if(!list.length)return head('研究计划')+body(researchTabs('研究计划')+empty('还没有研究计划','建议先创建项目并设置评测，再从项目看板制定研究计划。',all('workspace').length?create:btn('去创建项目','nav',true,'项目')));
+   if(!list.length)return head('研究计划')+body(researchTabs('研究计划')+empty('还没有研究计划','先写下要验证的方向。可以在创建时选择项目，也可以稍后关联。',create));
    return head('研究计划',create)+body(researchTabs('研究计划')+'<div data-filter-scope><div class="library-bar">'+search('搜索计划、项目或状态')+'</div>'+
    planGroups.filter(k=>list.some(p=>state(p)===k)).map(k=>{const rows=list.filter(p=>state(p)===k);
      return '<details class="plan-group" data-detail="'+E(k)+'" open><summary>'+E(k)+' '+label(rows.length)+'</summary>'+rows.map(p=>'<div data-filter-item>'+planRow(p)+'</div>').join('')+'</details>';
@@ -257,18 +399,17 @@ function plans(){
  const chooser=switcher('切换计划',list.map(x=>[x.id,x.title,(get('workspace',x.workspace)?.name||'未关联项目')+' · '+state(x)]),'plan',id,'','切换研究计划');
  const showing=openPlanStatus.has(p.id);
  const header=navHeading(btn('研究计划','allPlans')+'<span aria-hidden="true">/</span><h1>'+E(p.title)+'</h1>',
- chooser+'<button type="button" class="mobile-status" data-act="togglePlanStatus" aria-controls="plan-status" aria-expanded="'+showing+'">实验状态</button>');
- const start='<div class="chat-welcome">'+mark+'<h2>讨论这项研究</h2><p>可以从一个要验证的假设开始，或先聊对照基线。</p><div class="flex">'+btn('梳理可验证的假设','planPrompt',false,'先梳理这项研究要验证的假设和成功标准。')+btn('讨论对照基线','planPrompt',false,'我们应该用什么作为对照基线？')+'</div></div>';
+ chooser+btn('删除计划','archivePlan')+'<button type="button" class="mobile-status" data-act="togglePlanStatus" aria-controls="plan-status" aria-expanded="'+showing+'">实验状态</button>');
  return header+'<div class="issue research-chat'+(showing?' show-status':'')+'"><div class="dialogue"><div class="conversation" aria-label="研究对话"><div class="inner">'+
- '<details class="chat-context"><summary>研究方向</summary><p>'+E(p.direction)+'</p></details>'+
- (p.messages.length?transcript(p.messages):start)+reportCard(p)+'</div></div>'+composer('和 TripSci 讨论这项研究…','Enter 发送 · Shift + Enter 换行')+
+ '<details class="chat-context" data-detail="plan-direction"><summary>研究方向</summary><p>'+E(p.direction)+'</p></details>'+
+ transcript(p.messages)+researchActivity(p)+turnPreview(chatTurns.get(page+id))+'</div></div>'+composer('回复这项研究…','Enter 发送 · Shift + Enter 换行')+
  '</div><aside id="plan-status" class="rail" aria-label="研究计划状态">'+rail(p)+'</aside></div>';
 }
 function outcome(e){return e.guardrail_passed===false?'未通过护栏':e.accepted?'通过护栏 · 有改进':'通过护栏 · 未改进'}
 function experimentSummary(e,p){
  const t=task(p);
  return '<article class="result-row"><div class="flex spread"><strong>'+E(p.title)+' · 第 '+E(e.round)+' 轮</strong>'+label(outcome(e))+'</div>'+runAnalysis(e,t)+
- '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p><p class="mono">代码 '+E(e.revision)+'<br>报告 '+E(e.report)+'</p></details>'+btn('打开研究计划','plan',false,p.id)+'</article>';
+ '<details data-detail="'+E(e.id)+'"><summary>指标与复现证据</summary><p>'+metrics(e.result)+'</p><p class="mono">代码 '+E(e.revision)+'<br>报告 '+E(e.report)+(e.run_path?'<br>运行目录 '+E(e.run_path):'')+'</p></details>'+btn('打开研究计划','plan',false,p.id)+'</article>';
 }
 let experimentProject='', experimentOutcome='', experimentLimit=25;
 function experimentLibrary(){
@@ -310,6 +451,24 @@ function integrationForm(){
  input('revision','合并后的 Git 提交哈希')+projectMetrics(p).map(k=>input(k,metricNames[k],undefined,'number')).join('')+
  area('summary','变更与评测摘要'),'保存评测');
 }
+function projectSidebar(p, plans){
+ const imported=['iris','beans','name-llm'].includes(p.adapter);
+ const field=(name,value)=>'<dt>'+E(name)+'</dt><dd>'+E(value||'未配置')+'</dd>';
+ const source=p.repo&&/^https?:\/\//i.test(p.repo)?
+   '<a href="'+E(p.repo)+'" target="_blank" rel="noopener noreferrer">'+E(p.repo)+'</a>':E(p.repo||'未配置');
+ const active=plans.filter(plan=>state(plan)==='进行中').length;
+ const remoteFields=(modes[p.mode]||[]).map(([key,name])=>field(name,p[key])).join('');
+ return '<aside class="rail project-sidebar" aria-label="项目状态与配置"><section><h2>项目状态</h2>'+
+   kv('评测环境',imported?'本机真实评测':'模拟评测')+kv('进行中的研究计划',active)+'</section>'+
+   '<section><div class="flex spread"><h2>项目配置</h2>'+label('v'+p.version)+'</div>'+
+   '<dl>'+field('执行模式',modeNames[p.mode])+
+   '<dt>'+(imported?'数据来源':'代码仓库地址')+'</dt><dd>'+source+'</dd>'+
+   (imported?field('执行代码','TripSci 内置评测代码'):'')+
+   (p.source_repo?field('上游代码仓库',p.source_repo)+field('上游提交',p.source_revision)+field('本机代码目录',p.source_checkout):'')+
+   (p.managed_dir?field('TripSci 管理目录',p.managed_dir):'')+field('数据版本',p.dataset)+field('默认基线',p.baseline)+field('训练入口',p.train)+field('评测入口',p.evaluate)+
+   (Number.isFinite(p.floor)?field(imported?'准确率护栏':'AUC 护栏',String(p.floor)):'')+remoteFields+'</dl>'+
+   (imported?'<p class="muted">此项目使用固定的导入数据和评测协议。</p>':btn('编辑配置','editProject'))+btn('删除项目','archiveProject')+'</section></aside>';
+}
 function projects(){
  const p=get('workspace',id), actions=btn('＋ 新建项目','newProject',true);
  if(!all('workspace').length)return head('项目')+body('<section class="guide guide-single"><div class="guide-copy">'+
@@ -322,11 +481,10 @@ function projects(){
  const ps=all('plan').filter(x=>x.workspace===p.id), byTask=new Map(ps.filter(x=>x.task).map(x=>[x.task,x]));
  const ex=all('experiment').filter(x=>byTask.has(x.task)).sort((a,b)=>(b.ready_at||0)-(a.ready_at||0));
  const filter=resultFilters[p.id]||'全部', shown=ex.filter(e=>filter==='全部'||(filter==='有改进'?e.accepted:filter==='未通过护栏'?e.guardrail_passed===false:e.guardrail_passed!==false&&!e.accepted));
- return navHeading(btn('项目列表','nav',false,'项目')+'<span aria-hidden="true">/</span>'+switcher(p.name,all('workspace').map(w=>[w.id,w.name,modeNames[w.mode]]),'project',p.id,'','切换项目'),btn('＋ 新建研究计划','newPlan',true))+body('<p class="lede">项目看板 · '+(p.adapter!=='mock'?'真实评测':'模拟评测')+'</p>'+
+ return navHeading(btn('项目列表','nav',false,'项目')+'<span aria-hidden="true">/</span>'+switcher(p.name,all('workspace').map(w=>[w.id,w.name,modeNames[w.mode]]),'project',p.id,'','切换项目'),btn('＋ 新研究计划','newPlan',true))+'<div class="project-dashboard">'+projectSidebar(p,ps)+body('<p class="lede">项目看板 · '+(p.adapter!=='mock'?'真实评测':'模拟评测')+'</p>'+
  '<div class="dash-stats">'+card('<small>研究计划</small><strong>'+ps.length+'</strong>')+card('<small>有改进的实验</small><strong>'+ex.filter(e=>e.accepted).length+'</strong>')+card('<small>未通过护栏</small><strong>'+ex.filter(e=>e.guardrail_passed===false).length+'</strong>')+'</div>'+
  card('<h3>研究概览</h3>'+(ps.map(q=>{const runs=planRuns(q);return '<button type="button" class="study-row" data-act="plan" data-key="'+E(q.id)+'"><span><strong>'+E(q.title)+'</strong><small>'+E(q.direction)+'</small></span><small>'+runs.length+' 轮 · '+runs.filter(r=>r.accepted).length+' 轮有改进</small>'+label(state(q))+'</button>'}).join('')||'<p class="muted">此项目还没有研究计划。可以从右上角创建。</p>'))+
- trend(p)+card('<h3>实验结果 <small>（'+ex.length+'）</small></h3>'+(ex.length?tabs(['全部','有改进','未改进','未通过护栏'],filter,'resultFilter')+(shown.map(e=>experimentSummary(e,byTask.get(e.task))).join('')||'<p class="muted">当前筛选没有结果。</p>'):'<p class="muted">首轮评测完成后，这里会显示方案、指标和结论。</p>'))+
- card('<details><summary>项目配置 · v'+E(p.version)+'</summary>'+kv('模式',modeNames[p.mode])+kv('默认基线',p.baseline)+kv('数据',p.dataset)+kv('训练入口',p.train)+kv('评测入口',p.evaluate)+(p.adapter!=='mock'?'<p>固定协议 · 本机真实评测</p>':btn('编辑配置','editProject'))+'</details>'));
+ trend(p)+card('<h3>实验结果 <small>（'+ex.length+'）</small></h3>'+(ex.length?tabs(['全部','有改进','未改进','未通过护栏'],filter,'resultFilter')+(shown.map(e=>experimentSummary(e,byTask.get(e.task))).join('')||'<p class="muted">当前筛选没有结果。</p>'):'<p class="muted">首轮评测完成后，这里会显示方案、指标和结论。</p>')))+'</div>';
 }
 function library(){return [...all('tool').map(t=>({...t,description:t.kind==='link'?'打开研究文档或外部服务。':'保存常用命令供查看。'})),...all('skill').map(x=>({...x,kind:'skill',description:x.markdown.trim().split(/\r?\n/).find(line=>line.trim()&&!line.startsWith('#'))?.slice(0,110)||'可分配给智能体的 Markdown 指南。'}))]}
 const kinds={link:'网页链接',command:'命令参考',skill:'Skill'};
@@ -347,22 +505,56 @@ function tools(){
 function agentSkills(a){
  const names={'adaptive-ctr':'自适应实验策略','wide-search':'扩大搜索范围'};
  const chosen=a.skills.map(k=>[k,get('skill',k)?.name||names[k]||k]);
- const candidates=[['wide-search',names['wide-search']],...all('skill').map(x=>[x.id,x.name])].filter(([k])=>!a.skills.includes(k));
- return card('<div class="flex spread"><h3>已分配 Skills</h3>'+btn('＋ 创建并分配 Skill','agentSkill',false,a.id)+'</div><p class="muted">自定义 Skill 会随新计划保存。目前内置 Worker 只执行内置策略。</p>'+(chosen.length?chosen.map(([k,n])=>'<div class="catalog-row"><strong>'+E(n)+'</strong>'+ (k==='adaptive-ctr'?label('内置默认'):btn('移除','removeSkill',false,k))+'</div>').join(''):'<p class="muted">还没有分配 Skill。</p>')+
+ const supervisor=a.role==='supervisor';
+ const candidates=[...(supervisor?[]:[['wide-search',names['wide-search']]]),...all('skill').map(x=>[x.id,x.name])].filter(([k])=>!a.skills.includes(k));
+ return card('<div class="flex spread"><h3>已分配 Skills</h3>'+btn('＋ 创建并分配 Skill','agentSkill',false,a.id)+'</div><p class="muted">'+(supervisor?'已分配的 Skills 会在下一次主管回复时加载。':'自定义 Skill 会随新计划保存。目前内置 Worker 只执行内置策略。')+'</p>'+(chosen.length?chosen.map(([k,n])=>'<div class="catalog-row"><strong>'+E(n)+'</strong>'+ (k==='adaptive-ctr'?label('内置默认'):btn('移除','removeSkill',false,k))+'</div>').join(''):'<p class="muted">还没有分配 Skill。</p>')+
  (candidates.length?'<form data-form="assignSkill" class="flex inline-form">'+pick('skill',candidates)+'<button class="primary">分配已有 Skill</button></form>':'<p class="muted">所有可用 Skills 已分配。</p>'));
+}
+const proposalRestrictions={
+ projects:'项目配置提案',research:'研究计划与调度提案',configuration:'Skills、智能体与设置提案'
+};
+function agentTools(a){
+ if(a.role!=='supervisor')return card('<h3>工具</h3><p>当前运行时没有可独立配置的工具。执行范围由项目和研究计划确定。</p>');
+ return card('<h3>网页搜索</h3><p class="muted">让 Codex 搜索公开资料。工作区变更会在对话中单独确认。</p>'+
+ '<form class="fields inline-form" data-form="agentPermissions" data-key="'+E(a.id)+'" data-retain>'+
+ '<label><input type="checkbox" name="web_search" '+(a.permissions.web_search?'checked':'')+'> 启用网页搜索</label>'+
+ '<p class="submit-error" role="alert"></p><button class="primary">保存工具设置</button></form>');
+}
+function proposalPolicy(){
+ const a=all('agent').find(x=>x.role==='supervisor');
+ if(!a)return '';
+ const toggles=Object.entries(proposalRestrictions).map(([key,name])=>
+   '<label><input type="checkbox" name="'+key+'" '+(a.permissions[key]?'checked':'')+'> 允许'+E(name)+'</label>').join('');
+ return card('<details class="proposal-policy"><summary>研发主管提案限制</summary><p class="muted">以下是工作区级限制。允许提出的变更仍须在对话中逐项确认。</p>'+
+   '<form class="fields inline-form" data-form="agentPermissions" data-key="'+E(a.id)+'" data-retain>'+toggles+
+   '<p class="submit-error" role="alert"></p><button class="primary">保存提案限制</button></form></details>');
 }
 function agents(){
  const a=get('agent',id), newAgent=btn('＋ 新建智能体','newAgent',true), list=all('agent');
  if(!a)return head('智能体',newAgent)+body(tabs(['已配置','本机运行时'],agentTab==='本机运行时'?'本机运行时':'已配置','agentTab')+
- (agentTab==='本机运行时'?card('<div class="flex spread"><p class="muted">检测这台电脑安装的执行工具。</p>'+btn('重新检测','scanRuntimes')+'</div>'+all('runtimes').map(r=>'<div class="catalog-row"><div><strong>'+E(r.name)+'</strong><br><small>本机</small></div>'+label(runtimeStatus(r))+(r.installed?btn('配置智能体','chooseAgent',false,r.id):'')+'</div>').join('')):
- '<div data-filter-scope><div class="library-bar">'+search('搜索智能体或运行时')+'</div>'+(list.length?list.map(x=>'<button type="button" class="catalog-row clickable" data-filter-item data-act="agent" data-key="'+E(x.id)+'"><span class="role-icon" aria-hidden="true">◇</span><span><strong>'+E(x.name)+'</strong><br><small>'+E(runtimeName(x.runtime))+' · 本机</small></span>'+label(runtimeStatus(all('runtimes').find(r=>r.id===x.runtime)))+'<span aria-hidden="true">›</span></button>').join(''):empty('还没有智能体','从本机检测到的运行时创建研究角色。'))+'<p class="filter-empty" hidden>没有匹配的智能体。</p></div>'));
- const r=all('runtimes').find(x=>x.id===a.runtime);
- return navHeading(btn('智能体','nav',false,'智能体')+'<span aria-hidden="true">/</span><h1>'+E(a.name)+'</h1>')+body((returnPlan?btn('← 返回实验报告','plan',false,returnPlan):'')+(agentTab==='运行设置'?'':'<p class="lede">'+E(runtimeName(a.runtime))+' · 本机 '+label(runtimeStatus(r))+'</p>')+tabs(['概览','指令','Skills','运行设置'],agentTab,'agentTab')+
- (agentTab==='指令'?card('<h3>AGENTS.md</h3><p class="muted">这份 Markdown 属于当前智能体。</p><form class="fields inline-form" data-form="agentInstructions" data-retain>'+area('instructions','Markdown 指令',a.instructions)+'<button class="primary">保存指令</button></form>'):
- agentTab==='Skills'?agentSkills(a):agentTab==='运行设置'?card('<h3>运行时</h3>'+kv('机器','本机')+kv('运行时',runtimeName(a.runtime))+kv('状态',runtimeStatus(r))+(r?.executable?'':'<p class="muted">当前可保存配置，外部运行时尚未接入实验调度。</p>')):
- card('<div class="flex spread"><h3>角色配置</h3>'+btn('编辑名称','renameAgent')+'</div>'+kv('配置版本','v'+a.version)+kv('已分配 Skills',a.skills.length))));
+ (agentTab==='本机运行时'?card('<div class="flex spread"><p class="muted">检测这台电脑上的外部执行工具。</p>'+btn('重新检测','scanRuntimes')+'</div>'+externalRuntimes().map(r=>'<div class="catalog-row"><div><strong>'+E(r.name)+'</strong><br><small>本机</small></div>'+label(runtimeStatus(r))+(r.installed?btn('配置智能体','chooseAgent',false,r.id):'')+'</div>').join('')):
+ '<div data-filter-scope><div class="library-bar">'+search('搜索智能体或运行时')+'</div>'+(list.length?list.map(x=>'<button type="button" class="catalog-row clickable" data-filter-item data-act="agent" data-key="'+E(x.id)+'"><span class="role-icon" aria-hidden="true">◇</span><span><strong>'+E(x.name)+'</strong><br><small>'+E(x.role==='supervisor'?'工作区与研究对话 · Codex':runtimeName(x.runtime)+' · 本机')+'</small></span>'+label(x.role==='supervisor'?supervisorStatus(x):runtimeStatus(all('runtimes').find(r=>r.id===x.runtime)))+'<span aria-hidden="true">›</span></button>').join(''):empty('还没有智能体','从本机检测到的运行时创建研究角色。'))+'<p class="filter-empty" hidden>没有匹配的智能体。</p></div>'));
+ const supervisor=a.role==='supervisor', r=all('runtimes').find(x=>x.id===a.runtime);
+ const views=['概览','指令','Skills','运行设置','工具'];
+ const instructions=()=>card('<h3>AGENTS.md</h3>'+(supervisor?
+   '<p class="muted">TripSci 内置角色指令。</p><pre>'+E(a.instructions)+'</pre>':
+   '<p class="muted">这份 Markdown 属于当前智能体。</p><form class="fields inline-form" data-form="agentInstructions" data-retain>'+area('instructions','Markdown 指令',a.instructions)+'<button class="primary">保存指令</button></form>'));
+ const overview=()=>supervisor?
+   card('<h3>职责</h3><p>负责项目配置提案、研究方向、Worker 委派与反馈，以及 Skill 和配置管理。</p>'+kv('对话入口','工作区聊天、研究计划对话')):
+   card('<div class="flex spread"><h3>角色配置</h3>'+btn('编辑名称','renameAgent')+'</div>'+kv('配置版本','v'+a.version)+kv('已分配 Skills',a.skills.length));
+ const content={
+   概览:overview,
+   指令:instructions,
+   Skills:()=>agentSkills(a),
+   运行设置:()=>card('<h3>运行时</h3>'+kv('机器','本机')+kv('运行时',runtimeName(a.runtime))+
+     kv('状态',supervisor?supervisorStatus(a):runtimeStatus(r))+
+     (supervisor?'<p class="muted">对话需要本机 Codex 登录和网络连接。</p>':r?.executable?'':'<p class="muted">当前可保存配置，外部运行时尚未接入实验调度。</p>')),
+   工具:()=>agentTools(a)
+ };
+ return navHeading(btn('智能体','nav',false,'智能体')+'<span aria-hidden="true">/</span><h1>'+E(a.name)+'</h1>')+
+   body((returnPlan?btn('← 返回实验报告','plan',false,returnPlan):'')+tabs(views,agentTab,'agentTab')+content[agentTab]());
 }
-function settings(){return head('设置')+body(card('<h2 class="section-heading">模拟训练</h2><form class="fields" data-form="settings">'+input('delay','每轮模拟训练秒数',S.settings.delay,'number')+input('slots','训练并发上限',S.settings.slots||2,'number')+'<button class="primary">保存设置</button></form>'))}
+function settings(){return head('设置')+body(card('<h2 class="section-heading">模拟训练</h2><form class="fields" data-form="settings">'+input('delay','每轮模拟训练秒数',S.settings.delay,'number')+input('slots','训练并发上限',S.settings.slots||2,'number')+'<button class="primary">保存设置</button></form>')+proposalPolicy())}
 let renderedView='', quickThread=sessionStorage.getItem('tripsci-quick-thread')||'', quickSignature='';
 function quickChat(){
  const root=$('#quick-chat');
@@ -398,7 +590,7 @@ function render(){
  if(!same||html!==main._view){
    const saved={}, expanded=new Set(), groups=new Set([...main.querySelectorAll('.plan-group')].map(d=>d.dataset.detail));
    if(same){
-     for(const key of ['.body','.conversation','.rail']){
+     for(const key of ['.body','.conversation','.rail','.project-dashboard']){
        const el=main.querySelector(key);
        if(el)saved[key]=[el.scrollTop,el.scrollHeight-el.clientHeight-el.scrollTop<40];
      }
@@ -412,7 +604,7 @@ function render(){
      const key=d.dataset.detail||d.querySelector('summary')?.textContent;
      if(key&&(expanded.has(key)||!d.matches('.plan-group')||groups.has(key)))d.open=expanded.has(key);
    }
-   for(const key of ['.body','.conversation','.rail']){
+   for(const key of ['.body','.conversation','.rail','.project-dashboard']){
      const el=main.querySelector(key), prior=saved[key];
      if(el&&(prior||key==='.conversation'))el.scrollTop=key==='.conversation'&&(!prior||prior[1])?el.scrollHeight:prior[0];
    }
@@ -424,7 +616,7 @@ function modal(title,kind,fields,submit){
 }
 function projectForm(p={},attach=false){
  const fields=[['name','项目名称'],['repo','代码地址'],['baseline','默认基线'],['dataset','数据版本'],['train','训练入口'],['evaluate','评测入口']];
- modal(p.id?'编辑项目配置':'初始化研究项目','workspace','<p class="muted">三种配置均使用本机模拟训练。不会连接填写的仓库或远端。</p>'+
+ modal(p.id?'编辑项目配置':'初始化研究项目','workspace','<p class="muted">保存后，TripSci 会在自己的项目存储中保存配置。三种模式目前均使用本机模拟训练。</p>'+
  fields.map(([k,t])=>input(k,t,p[k])).join('')+input('floor','整体 AUC 下限',p.floor??.715,'number')+
  '<label>执行模式'+pick('mode',Object.entries(modeNames),p.mode||'local')+'</label><div id="modeFields"></div>'+
  '<input type="hidden" name="id" value="'+E(p.id)+'"><input type="hidden" name="attach" value="'+(attach?'yes':'')+'">'+btn('检查配置','check'),'保存项目');
@@ -432,11 +624,15 @@ function projectForm(p={},attach=false){
 }
 function modeFields(mode,p={}){$('#modeFields').innerHTML=modes[mode].map(([k,t])=>input(k,t,p[k])).join('')}
 function planForm(){
- const thread=page==='聊天'?get('thread',id):null;
- modal('新建研究计划','plan',input('title','标题',thread?.title)+area('direction','大致方向',thread?.messages.filter(m=>m.role==='user').map(m=>m.text).join('\n'))+
- '<label>所属项目'+pick('workspace',[['','暂不关联'],...all('workspace').map(w=>[w.id,w.name])],page==='项目'?get('workspace',id)?.id:'')+'</label><input type="hidden" name="source" value="'+E(thread?.id)+'">','创建并打开');
+ const workspace=page==='项目'?get('workspace',id)?.id:'';
+ modal('新研究计划','plan',
+   '<div class="plan-create">'+input('title','标题')+area('direction','大致方向')+
+   '<div class="plan-create-properties"><label>所属项目'+pick('workspace',[['','暂不关联'],...all('workspace').map(w=>[w.id,w.name])],workspace)+'</label>'+
+   '<span class="pill">计划中</span></div></div>',
+   '创建并打开');
+ $('#modal input[name=title]').focus();
 }
-function agentForm(a={},runtime=a.runtime||'local-process'){modal(a.id?'编辑智能体':'创建智能体 · 2 / 2','agent','<p>运行时：'+E(all('runtimes').find(x=>x.id===runtime)?.name||runtime)+'</p><input type="hidden" name="runtime" value="'+E(runtime)+'">'+input('name','名称',a.name)+area('instructions','Markdown 指令',a.instructions||'比较实验结果，遵守护栏。')+'<label><input type="checkbox" name="wide" '+(a.skills?.includes('wide-search')?'checked':'')+'> 启用 wide-search</label>'+all('skill').map(x=>'<label><input type="checkbox" name="skill" value="'+E(x.id)+'" '+(a.skills?.includes(x.id)?'checked':'')+'> '+E(x.name)+'</label>').join('')+'<input type="hidden" name="id" value="'+E(a.id)+'">','保存配置')}
+function agentForm(a={},runtime=a.runtime||'local-process'){modal(a.id?'编辑智能体':'创建智能体 · 2 / 2','agent','<p>运行时：'+E(runtimeName(runtime))+'</p><input type="hidden" name="runtime" value="'+E(runtime)+'">'+input('name','名称',a.name)+area('instructions','Markdown 指令',a.instructions||'比较实验结果，遵守护栏。')+'<label><input type="checkbox" name="wide" '+(a.skills?.includes('wide-search')?'checked':'')+'> 启用 wide-search</label>'+all('skill').map(x=>'<label><input type="checkbox" name="skill" value="'+E(x.id)+'" '+(a.skills?.includes(x.id)?'checked':'')+'> '+E(x.name)+'</label>').join('')+'<input type="hidden" name="id" value="'+E(a.id)+'">','保存配置')}
 const payload=f=>Object.fromEntries(new FormData(f));
 const close=()=>$('#modal').close();
 function saveAgent(a,patch){return act({op:'agent',id:a.id,name:a.name,runtime:a.runtime,instructions:a.instructions,skills:a.skills,...patch},close)}
@@ -452,7 +648,17 @@ document.addEventListener('click',e=>{
    return;
  }
  if(a==='quickFull'){if(!$('#quick-panel').hidden){$('#quick-panel').hidden=true;$('.quick-toggle').setAttribute('aria-expanded','false')}return nav('聊天',quickThread)}
- if(a==='newChat'){chatMode='chat';draftProject='';return nav('聊天')}
+ if(a==='retryChatTurn'||a==='editChatTurn'||a==='cancelChatEdit'){
+   const turn=chatTurns.get(page+id);
+   if(!turn?.error)return;
+   if(a==='retryChatTurn')return startChatTurn(turn.text,turn.finished?undefined:turn.requestKey);
+   turn.editing=a==='editChatTurn';saveChatTurns();render();
+   if(turn.editing)$('#main .turn-edit textarea')?.focus();
+   return;
+ }
+ if(a==='newChat'){if(chatTurns.delete('聊天')){delete drafts['聊天'];saveChatTurns()}return nav('聊天')}
+ if(a==='cancelSupervisor')return act({op:'cancel_supervisor',proposal_id:k},()=>notice('主管提案已取消'));
+ if(a==='confirmSupervisor')return act({op:'confirm_supervisor',proposal_id:k},()=>notice('主管提案已执行'));
  if(a==='retry')return load();
  if(a==='retryPlan')return act({op:'retry',id});
  if(a==='nav')return nav(k);
@@ -462,13 +668,12 @@ document.addEventListener('click',e=>{
  if(a==='chat')return nav('聊天',k,!!b.closest('.recent-items'));
  if(a==='plan')return nav('研究计划',k,!!b.closest('.recent-items'));
  if(a==='togglePlanStatus'){if(openPlanStatus.has(id))openPlanStatus.delete(id);else openPlanStatus.add(id);return render()}
- if(a==='planPrompt'){const field=$('#send textarea');if(!field.value){field.value=k;drafts[page+id]=k}field.focus();return}
  if(a==='resultFilter'){resultFilters[current().id]=k;return render()}
  if(a==='reportWorker'){const plan=id;nav('智能体',k);returnPlan=plan;agentTab='Skills';return render()}
  if(a==='reportSkill'||a==='agentSkill'){
    const p=a==='reportSkill'?get('plan',id):null, target=get('agent',k);if(!target)return;
    const template=p?'# 实验评审规范\n\n参考「'+p.title+'」的实验报告。\n\n- 明确假设、对照基线和主要指标。\n- 固定数据划分与评测入口。\n- 记录未通过护栏或没有改进的实验，以及下一步。':'# 实验规范\n\n- ';
-   return modal('为 '+target.name+' 创建 Skill','workerSkill','<p>保存后直接分配给该 Worker。运行中的计划仍使用启动时的配置。</p>'+input('name','名称',p?'实验评审规范':'')+area('markdown','Skill Markdown',template)+'<input type="hidden" name="agent" value="'+E(k)+'">','保存并分配');
+   return modal('为 '+target.name+' 创建 Skill','createAssignedSkill','<p>保存后分配给当前智能体，下次运行时生效。</p>'+input('name','名称',p?'实验评审规范':'')+area('markdown','Skill Markdown',template)+'<input type="hidden" name="agent" value="'+E(k)+'">','保存并分配');
  }
  if(a==='downloadReport'){
    const p=get('plan',id);if(!p?.report)return;
@@ -483,14 +688,21 @@ document.addEventListener('click',e=>{
  if(a==='scanRuntimes')return load().then(()=>notice('已重新检测本机运行时'));
  if(a==='chooseAgent')return agentForm({},k);
  if(a==='renameAgent')return modal('编辑智能体名称','renameAgent',input('name','名称',get('agent',id).name),'保存');
- if(a==='removeSkill'){const x=get('agent',id);return saveAgent(x,{skills:x.skills.filter(v=>v!==k)})}
+ if(a==='removeSkill'){const x=get('agent',id);return act({op:'agent_skills',id:x.id,skills:x.skills.filter(v=>v!==k)})}
  if(a==='agent')return nav('智能体',k);
  if(a==='close')return close();
  if(a==='newProject'||a==='projectForPlan')return projectForm({},a==='projectForPlan');
+ if(a==='archiveProject'||a==='archivePlan'){
+   const projectRemoval=a==='archiveProject';
+   const target=get(projectRemoval?'workspace':'plan',id);
+   const note=projectRemoval?'此项目及所属研究计划会从工作区移除。':'此研究计划会从工作区和项目看板移除。';
+   return modal(projectRemoval?'删除项目':'删除研究计划',projectRemoval?'archive_workspace':'archive_plan',
+     '<p><strong>'+E(target.name||target.title)+'</strong></p><p>'+note+'代码、数据和实验文件会保留。</p>','确认删除');
+ }
  if(a==='editProject')return projectForm(current());
  if(a==='newPlan')return planForm();
  if(a==='recordIntegration')return integrationForm();
- if(a==='newAgent')return modal('创建智能体 · 1 / 2','chooseRuntime','<h3>在哪里运行？</h3><p class="muted">本机 · 选择检测到的运行时。</p>'+all('runtimes').filter(r=>r.installed).map((r,i)=>'<label class="runtime-choice"><input name="runtime" type="radio" value="'+E(r.id)+'" '+(!i?'checked':'')+' required><span><strong>'+E(r.name)+'</strong><br><small>'+E(runtimeStatus(r))+'</small></span></label>').join(''),'继续');
+ if(a==='newAgent')return modal('创建智能体 · 1 / 2','chooseRuntime','<h3>在哪里运行？</h3><p class="muted">选择内置执行器或已检测到的外部运行时。</p>'+all('runtimes').filter(r=>r.installed).map((r,i)=>'<label class="runtime-choice"><input name="runtime" type="radio" value="'+E(r.id)+'" '+(!i?'checked':'')+' required><span><strong>'+E(runtimeName(r.id))+'</strong><br><small>'+E(runtimeStatus(r))+'</small></span></label>').join(''),'继续');
  if(a==='editAgent')return agentForm(get('agent',id));
  if(a==='finishLoop')return modal('结束持续迭代','finish','<p>已提交的实验会完成，再生成报告。不会再启动下一轮。</p>','确认结束');
  if(a==='newTool')return modal('添加工具','chooseTool','<p>选择要添加到工作区的工具类型。</p>'+pick('kind',[['link','网页链接'],['command','命令参考']]),'继续');
@@ -501,7 +713,8 @@ document.addEventListener('click',e=>{
    const p=get('plan',id),env=get('workspace',p?.workspace);if(!env)return;
    const bean=env.adapter==='beans', ntl=env.adapter==='name-llm', real=bean||ntl||env.adapter==='iris';
    const extra=ntl?'<label>研究策略'+pick('strategy',[['char','字符 n-gram'],['style','文体与标点'],['adaptive','自由迭代']])+'</label>':bean?'<label>研究策略'+pick('strategy',[['centroid','质心与特征消融'],['bayes','高斯朴素贝叶斯'],['adaptive','自适应特征权重']])+'</label><label>运行方式'+pick('run_mode',[['bounded','固定轮次'],['continuous','持续迭代（自适应策略）']])+'</label><div id="loopInterval" hidden>'+input('interval','轮次间隔（秒）',30,'number')+'</div>':'';
-   return modal('确认并启动实验','start','<p>'+E(env.name)+' · '+E(modeNames[env.mode])+(real?' · 真实数据</p>':' · 模拟</p>')+kv('数据',env.dataset)+kv(real?'准确率下限':'整体 AUC 下限',env.floor)+(real?kv('固定基线',env.baseline):input('baseline','对照基线',env.baseline))+area('design','已确认的实验设计',p.direction)+extra+'<div id="roundBudget">'+input('budget',ntl?'实验预算（1–20）':'实验预算（1–10）',ntl?4:3,'number')+'</div><label>执行者'+pick('agent',all('agent').filter(x=>x.runtime==='local-process').map(x=>[x.id,x.name+' · v'+x.version]))+'</label>',real?'启动本机评测':'启动模拟研究');
+   const research=ntl?'<label>研究决策'+pick('research_mode',[['codex','Codex 自主研究 · 根据目标和证据选择下一轮'],['rules','内置策略 · 固定扫描或参数搜索']])+'</label>':!real&&env.mode==='local'?'<label>研究决策'+pick('research_mode',[['rules','内置规则'],['codex','Codex 研究决策（模拟评测）']])+'</label>':'';
+   return modal('确认并启动实验','start','<p>'+E(env.name)+' · '+E(modeNames[env.mode])+(real?' · 真实数据</p>':' · 模拟</p>')+kv('数据',env.dataset)+kv(real?'准确率下限':'整体 AUC 下限',env.floor)+(real?kv('固定基线',env.baseline):input('baseline','对照基线',env.baseline))+area('design','已确认的实验设计',p.direction)+research+(ntl?'<div id="rule-strategy" hidden>'+extra+'</div>':extra)+'<div id="roundBudget">'+input('budget','实验预算（1–10）',ntl?4:3,'number')+'</div><label>执行者'+pick('agent',all('agent').filter(x=>x.runtime==='local-process').map(x=>[x.id,x.name+' · v'+x.version]))+'</label>',real?'启动本机评测':'启动模拟研究');
  }
  if(a==='feedback')return modal('给 Worker 反馈','feedback','<p>当前训练继续。可发送「保守」或「强度 0.55」来改变下一轮。</p>'+area('text','反馈'),'发送反馈');
  if(a==='check'){
@@ -511,10 +724,6 @@ document.addEventListener('click',e=>{
  if(['pause','resume','decision'].includes(a))act({op:a,id,value:k});
 });
 document.addEventListener('change',e=>{
- if(e.target.name==='聊天模式'){
-   chatMode=e.target.value;render();$('#send textarea')?.focus();return;
- }
- if(e.target.name==='计划所属项目'){draftProject=e.target.value;return}
 
  if(e.target.name==='实验所属项目'||e.target.name==='实验结论'){
    if(e.target.name==='实验所属项目')experimentProject=e.target.value;else experimentOutcome=e.target.value;
@@ -522,6 +731,7 @@ document.addEventListener('change',e=>{
  }
  if(e.target.name==='趋势指标'){chartChoices[current().id]=e.target.value;render()}
  if(e.target.name==='strategy'&&get('workspace',get('plan',id)?.workspace)?.adapter==='name-llm')$('#roundBudget input').value=e.target.value==='adaptive'?20:4;
+ if(e.target.name==='research_mode'&&$('#rule-strategy'))$('#rule-strategy').hidden=e.target.value==='codex';
  if(e.target.name==='run_mode'){
    const continuous=e.target.value==='continuous';$('#roundBudget').hidden=continuous;$('#loopInterval').hidden=!continuous;
    if(continuous)$('#modal select[name=strategy]').value='adaptive';
@@ -539,27 +749,49 @@ document.addEventListener('input',e=>{
 });
 document.addEventListener('focusout',e=>{if(e.target.matches('#send textarea'))setTimeout(()=>{if(!busy&&!$('#send textarea')?.matches(':focus')&&!$('#modal').open)render()},80)});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.target.matches('#send textarea,#quick-send textarea')){e.preventDefault();e.target.form.requestSubmit()}});
+async function sendChat(form, payload, done){
+ const submit=form.querySelector('button[type="submit"], button:not([type])');
+ let status=form.querySelector('.chat-send-status');
+ if(!status){
+   status=document.createElement('small');
+   status.className='chat-send-status';
+   status.setAttribute('role','status');
+   form.append(status);
+ }
+ status.textContent='研发主管正在回复…';
+ if(submit)submit.disabled=true;
+ try{
+   await act(payload,row=>{status.textContent='';done(row)},message=>{status.textContent=message});
+ }finally{
+   if(submit)submit.disabled=false;
+ }
+}
 document.addEventListener('submit',async e=>{
  const f=e.target, op=f.getAttribute('data-form'), send=f.getAttribute('id')==='send';
  if(f.id==='quick-send'){
    e.preventDefault();
    const field=f.querySelector('textarea'), text=field.value.trim();
    if(!text||busy)return;
-   return act({op:'message',text,thread:quickThread},r=>{quickThread=r.id;sessionStorage.setItem('tripsci-quick-thread',r.id);if(field.value.trim()===text)field.value=''});
+   return sendChat(f,{op:'message',text,thread:quickThread},r=>{quickThread=r.id;sessionStorage.setItem('tripsci-quick-thread',r.id);if(field.value.trim()===text)field.value=''});
  }
  if(!send&&!op)return;e.preventDefault();if(busy)return;
  const d=payload(f);
  if(send){
-   const text=d.text.trim(), key=page+id;if(!text)return;
-   if(page==='聊天'&&!id&&chatMode==='plan'){
-     if(Array.from(text).length>500)return notice('研究方向请控制在 500 字以内。');
-     const title=Array.from(text.split(/\r?\n/)[0]).slice(0,40).join('');
-     return act({op:'plan',title,direction:text,workspace:draftProject},r=>{
-       delete drafts[key];chatMode='chat';draftProject='';nav('研究计划',r.id);
-     });
-   }
-   return act({op:'message',text,[page==='聊天'?'thread':'plan']:id},r=>{delete drafts[key];id=r.id;rememberView(page,id)});
+   const text=d.text.trim(), turn=chatTurns.get(page+id);
+   if(text&&(!turn||turn.error))return startChatTurn(text);
+   return;
  }
+ if(op==='editChatTurn'){
+   const turn=chatTurns.get(page+id), text=d.text.trim();
+   if(text&&turn?.error)return startChatTurn(text,text===turn.text&&!turn.finished?turn.requestKey:undefined);
+   return;
+ }
+ if(op==='archive_workspace'||op==='archive_plan')return act({op,id},()=>{
+   close();
+   if(op==='archive_workspace'&&project===id)project='';
+   nav(op==='archive_workspace'?'项目':'研究计划');
+   notice('已从工作区移除');
+ });
  if(op==='workspace'){
    const attach=d.attach==='yes', plan=id;delete d.attach;
    return act({...d,op,attach_plan:attach?plan:'',floor:Number(d.floor)},r=>{close();project=r.id;if(!attach){page='项目';id=r.id;rememberView(page,id)}});
@@ -569,14 +801,24 @@ document.addEventListener('submit',async e=>{
    const p=current(), plans=new FormData(f).getAll('sourcePlan');
    return act({op,workspace:p.id,plans,revision:d.revision,summary:d.summary,metrics:Object.fromEntries(projectMetrics(p).map(k=>[k,Number(d[k])]))},close);
  }
- if(op==='plan')return act({...d,op},r=>{close();page='研究计划';id=r.id;rememberView(page,id)});
+ if(op==='plan'){
+   return act({...d,op},r=>{
+     close();
+     nav('研究计划',r.id);
+     $('#send textarea')?.focus({preventScroll:true});
+   });
+ }
  if(op==='chooseRuntime')return agentForm({},d.runtime);
  if(op==='chooseTool'){
    const name=kinds[d.kind];return modal('添加'+name,'tool',input('name','名称')+input('target',d.kind==='link'?'链接地址':'命令',undefined,d.kind==='link'?'url':'text')+'<input type="hidden" name="kind" value="'+E(d.kind)+'">','保存');
  }
- if(op==='workerSkill')return act({...d,op:'skill'},()=>{close();notice('已保存并分配给 Worker')});
+ if(op==='createAssignedSkill')return act({...d,op:'skill'},()=>{close();notice('已保存并分配')});
  if(op==='tool'||op==='skill')return act({...d,op},r=>{close();id=r.id;toolTab=op==='skill'?'Skills':'我的工具'});
- if(op==='assignSkill'){const x=get('agent',id);return saveAgent(x,{skills:[...new Set([...x.skills,d.skill])]})}
+ if(op==='assignSkill'){const x=get('agent',id);return act({op:'agent_skills',id:x.id,skills:[...new Set([...x.skills,d.skill])]})}
+ if(op==='agentPermissions'){
+   const permissions=Object.fromEntries(Array.from(f.querySelectorAll('input[type=checkbox]'),field=>[field.name,field.checked]));
+   return act({op:'agent_permissions',id:f.dataset.key,permissions},()=>notice('设置已保存'),message=>{f.querySelector('.submit-error').textContent=message});
+ }
  if(op==='agentInstructions'||op==='renameAgent')return saveAgent(get('agent',id),d);
  if(op==='agent')return act({...d,op,skills:['adaptive-ctr',...(d.wide?['wide-search']:[]),...new FormData(f).getAll('skill')]},r=>{close();id=r.id;agentTab='概览';notice('智能体配置已保存')});
  if(op==='settings')return act({op,delay:Number(d.delay),slots:Number(d.slots)},()=>notice('已保存设置'));
@@ -585,3 +827,5 @@ document.addEventListener('submit',async e=>{
  act({...d,op,id},close);
 });
 render();load();setInterval(load,850);
+
+for(const turn of chatTurns.values())if(!turn.error)runChatTurn(turn);

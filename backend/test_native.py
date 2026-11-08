@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ class NativeAPI(unittest.TestCase):
         self.proc.stdout.close()
 
     def start(self):
-        proc = subprocess.Popen([sys.executable,str(Path(__file__).with_name("app.py")),
+        proc = subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/"tests/chat_fixture_server.py"),
                                  "--state",str(self.root),"--port","0"], stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL,text=True)
         self.proc = proc
@@ -56,6 +57,119 @@ class NativeAPI(unittest.TestCase):
         params.update(opts)
         return self.api("workspace",**params)
 
+    def test_project_archive_preserves_files_and_linked_plan(self):
+        project = self.workspace()
+        plan = self.api("plan", title="保留研究", direction="验证归档", workspace=project["id"])
+        self.api("archive_workspace", id=project["id"])
+        state = self.api()
+        self.assertEqual(state["workspace"], [])
+        self.assertEqual(state["plan"], [])
+        self.assertTrue((self.root / project["config_path"]).is_file())
+        with sqlite3.connect(self.root / "state.sqlite") as db:
+            saved = db.execute("SELECT body FROM records WHERE kind='plan' AND id=?", (plan["id"],)).fetchone()
+        self.assertEqual(json.loads(saved[0])["workspace"], project["id"])
+        with self.assertRaises(HTTPError):
+            self.api("message", plan=plan["id"], text="继续研究")
+
+    def test_supervisor_skill_proposal_and_reload(self):
+        thread = self.api("message", text="fixture: supervisor skill")
+        proposal = thread["messages"][-1]["proposal"]
+        skill = self.api("confirm_supervisor", proposal_id=proposal["id"])
+        supervisor = self.api()["agent"][0]
+        self.assertEqual(supervisor["skills"], [skill["id"]])
+        self.stop()
+        self.start()
+        reply = self.api("message", thread=thread["id"], text="fixture: active skills")
+        self.assertEqual(reply["messages"][-1]["text"], skill["name"])
+        self.api("agent_skills", id=supervisor["id"], skills=[])
+        reply = self.api("message", thread=thread["id"], text="fixture: active skills")
+        self.assertEqual(reply["messages"][-1]["text"], "无")
+
+    def test_supervisor_proposal_requires_confirmation_and_is_idempotent(self):
+        reply=self.api("message",text="fixture: propose project",request_key="supervisor-test-001")
+        proposal=reply["messages"][-1]["proposal"]
+        self.assertEqual(proposal["status"],"pending")
+        self.assertEqual(self.api()["workspace"],[])
+        self.assertFalse((self.root / "projects").exists())
+        same=self.api("message",text="fixture: propose project",request_key="supervisor-test-001")
+        self.assertEqual(same,reply)
+        saved=self.api("confirm_supervisor",proposal_id=proposal["id"])
+        self.assertEqual(self.api("confirm_supervisor",proposal_id=proposal["id"]),saved)
+        directory = self.root / "projects" / saved["id"]
+        self.assertEqual(saved["managed_dir"], str(directory.relative_to(self.root)))
+        self.assertEqual(json.loads((directory / "config-v1.json").read_text()), saved)
+        self.assertEqual(list(directory.parent.iterdir()), [directory])
+        state=self.api()
+        self.assertEqual(len(state["workspace"]),1)
+        self.assertEqual(state["thread"][0]["messages"][-1]["proposal"]["status"],"applied")
+
+    def test_manual_project_config_stays_in_the_managed_directory(self):
+        project = self.workspace(name="../outside", managed_dir="../outside")
+        updated = self.workspace(id=project["id"], name="New name")
+        self.assertEqual(updated["managed_dir"], project["managed_dir"])
+        self.assertEqual(updated["version"], 2)
+        self.assertEqual(json.loads((self.root / updated["config_path"]).read_text()), updated)
+        self.assertEqual(json.loads((self.root / project["config_path"]).read_text()), project)
+
+    def test_chat_and_manual_actions_share_validation_and_plan_provenance(self):
+        bad = self.api("message", text="fixture: invalid project")["messages"][-1]["proposal"]
+        with self.assertRaises(HTTPError) as manual:
+            self.api("workspace", **bad["payload"])
+        with self.assertRaises(HTTPError) as chat:
+            self.api("confirm_supervisor", proposal_id=bad["id"])
+        self.assertEqual(chat.exception.read(), manual.exception.read())
+        self.assertEqual(self.api()["workspace"], [])
+        thread = self.api("message", text="fixture: propose plan")
+        proposal = thread["messages"][-1]["proposal"]
+        manual_plan = self.api("plan", source=thread["id"], **proposal["payload"])
+        chat_plan = self.api("confirm_supervisor", proposal_id=proposal["id"])
+        self.assertEqual({**manual_plan, "id": chat_plan["id"]}, chat_plan)
+
+        settings = self.api("message", text="fixture: propose settings")["messages"][-1]["proposal"]
+        self.assertNotEqual(self.api()["settings"]["delay"], settings["payload"]["delay"])
+        manual_settings = self.api("settings", **settings["payload"])
+        self.assertEqual(self.api("confirm_supervisor", proposal_id=settings["id"]), manual_settings)
+
+    def test_legacy_supervisor_permissions_migrate(self):
+        supervisor = self.api()["agent"][0]
+        permissions = {**supervisor["permissions"], "web_search": False}
+        self.stop()
+        with sqlite3.connect(self.root / "state.sqlite") as db:
+            db.execute("DELETE FROM records WHERE kind='agent' AND id=?", (supervisor["id"],))
+            db.execute("INSERT INTO records VALUES (?,?,?)", ("agent_permissions", supervisor["id"],
+                       json.dumps({"permissions":permissions})))
+        self.start()
+        self.assertEqual(self.api()["agent"][0]["permissions"], permissions)
+
+    def test_builtin_agents_have_persisted_instructions(self):
+        for agent in self.api()["agent"]:
+            path = self.root / agent["instructions_path"]
+            self.assertEqual(path.read_text().strip(), agent["instructions"].strip())
+        before = self.api()["agent"]
+        self.stop()
+        self.start()
+        self.assertEqual(self.api()["agent"], before)
+
+    def test_supervisor_permissions_persist_and_revoke_pending_proposals(self):
+        supervisor = self.api()["agent"][0]
+        permissions = supervisor["permissions"]
+        self.assertTrue(permissions["web_search"])
+        response = self.api("message", text="fixture: propose project")
+        proposal = response["messages"][-1]["proposal"]
+        permissions.update(web_search=False, projects=False)
+        self.api("agent_permissions", id=supervisor["id"], permissions={"projects":False})
+        self.api("agent_permissions", id=supervisor["id"], permissions={"web_search":False})
+        with self.assertRaises(HTTPError) as error:
+            self.api("confirm_supervisor", proposal_id=proposal["id"])
+        self.assertEqual(error.exception.code, 403)
+        with self.assertRaises(HTTPError) as error:
+            self.api("message", text="fixture: propose project")
+        self.assertEqual(error.exception.code, 403)
+        self.stop()
+        self.start()
+        self.assertEqual(self.api()["agent"][0]["permissions"], permissions)
+        self.assertEqual(self.api()["workspace"], [])
+
     def test_modes_chat_and_contracts(self):
         draft=self.api("plan",title="低频研究",direction="验证平滑")
         with self.assertRaises(HTTPError):
@@ -75,7 +189,10 @@ class NativeAPI(unittest.TestCase):
         self.api("message",plan=plan["id"],text="请解释下一轮怎么跑")
         self.assertFalse(self.api()["inbox"])
         agent=self.api("agent",name="专用 Worker",instructions="初版")
-        self.assertEqual(len(self.api()["agent"]),2)
+        agents=self.api()["agent"]
+        self.assertEqual(len(agents),3)
+        supervisor=next(a for a in agents if a.get("role")=="supervisor")
+        self.assertEqual((supervisor["id"],supervisor["runtime"]),("tripsci-supervisor","codex"))
         remote=self.api()["workspace"][-1]
         self.api("attach",id=plan["id"],workspace=remote["id"])
         started=self.api("start",id=plan["id"],budget=1,agent=agent["id"],baseline="override")

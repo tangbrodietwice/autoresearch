@@ -42,7 +42,7 @@ button,.control{min-height:var(--control-height)}.link,.exp{min-height:0}
 .plan-group{margin-bottom:12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:0 8px}.plan-group>summary{cursor:pointer;padding:9px 4px;font-weight:650}.plan-group>summary .pill{margin-left:5px}.plan-group>div:last-child .listrow{border-bottom:0}.project-row{min-height:57px}
 .head h1{margin:0;font-size:14px;font-weight:700;line-height:1.4;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card .section-heading{margin:0 0 10px;font-size:15px}.top{display:none}.shell{height:100dvh}
 @media(max-width:740px){.top{display:flex}.shell{height:auto;min-height:calc(100dvh - 52px)}.switch-menu{width:min(360px,calc(100vw - 130px))}.listrow strong,.study-row strong{overflow-wrap:anywhere}}
-.research-chat .conversation{padding-top:14px}.chat-context{color:var(--sub);font-size:12px;margin-bottom:18px}.chat-context summary{cursor:pointer}.chat-context p{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}.chat-welcome{text-align:center;padding:clamp(18px,7vh,65px) 4px}.chat-welcome h2{margin:10px 0 4px;font-size:19px}.chat-welcome p{margin:0 0 12px;color:var(--sub)}.chat-welcome .flex{justify-content:center}.research-chat .compose{flex:none}.research-chat .compose textarea{min-height:58px}.head>.flex:has(.switcher){flex-wrap:nowrap}.mobile-status{display:none}.notifier{top:12px;bottom:auto;max-width:calc(100vw - 24px)}
+.research-chat .conversation{padding-top:14px}.chat-context{color:var(--sub);font-size:12px;margin-bottom:18px}.chat-context summary{cursor:pointer}.chat-context p{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}.research-chat .compose{flex:none}.research-chat .compose textarea{min-height:58px}.head>.flex:has(.switcher){flex-wrap:nowrap}.mobile-status{display:none}.notifier{top:12px;bottom:auto;max-width:calc(100vw - 24px)}
 @media(max-width:740px){.research-chat{height:calc(100dvh - 155px);min-height:320px;position:relative}.research-chat .dialogue{height:100%}.research-chat .conversation{min-height:0}.mobile-status{display:inline-block}.research-chat .rail{display:none}.research-chat.show-status .rail{display:block;position:absolute;inset:0 0 0 auto;width:min(100%,340px);z-index:1;border:1px solid var(--line);box-shadow:0 4px 24px #32271f24}.head .switcher .switch-menu{left:auto;right:0}.head .breadcrumb .switcher .switch-menu{left:0;right:auto}}
 .pill.tone-active{background:#e2edf9;color:#254f77}.pill.tone-done{background:#e0eee4;color:#215b3b}.pill.tone-review{background:#faedcf;color:#745118}.pill.tone-neutral{background:#edeae5;color:#5f5b55}.pill.tone-failed{background:#f8e4de;color:#873928}.pill>span{font-weight:700}
 #quick-chat{position:fixed;right:18px;bottom:15px;z-index:5} .quick-toggle{float:right;background:var(--panel);border-color:#cbb9aa;box-shadow:0 4px 16px #32271f19;min-height:36px}#quick-panel{position:absolute;right:0;bottom:45px;width:min(355px,calc(100vw - 28px));height:min(420px,calc(100dvh - 95px));display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 36px #32271f30;overflow:hidden}#quick-panel header{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line);padding:8px 10px}#quick-panel header strong{margin-right:auto}#quick-panel header button{min-height:28px;padding:2px 8px}.quick-log{flex:1;min-height:0;overflow:auto;padding:8px 12px}.quick-log .msg{margin:9px 0}.quick-log .trip-mark{width:24px;height:24px}#quick-send{display:flex;align-items:end;gap:6px;padding:8px;border-top:1px solid var(--line)}#quick-send textarea{min-height:48px;resize:none;flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:5px 7px;background:var(--canvas)}.rail,.body{scrollbar-gutter:stable}.rail{padding-bottom:65px}.body{padding-bottom:62px}@media(max-width:740px){#quick-chat{right:10px;bottom:8px}.quick-toggle span{display:none}.quick-toggle{min-width:35px}#quick-panel{bottom:42px}.research-chat .compose{padding-right:50px}}
@@ -79,8 +79,66 @@ button,.control{min-height:var(--control-height)}.link,.exp{min-height:0}
 @media(hover:none){.project-heading .project-add,.project-heading .project-expand{opacity:1}}
 @media(max-width:740px){.project-heading .project-add{display:none}}
 .guide.guide-single{grid-template-columns:minmax(0,630px);justify-content:center}
+.supervisor-proposal{margin-top:8px;padding:8px;border:1px solid var(--line);border-radius:8px}
+.chat-send-status{display:block;margin:4px 6px;color:var(--sub)}.chat-send-status:empty{display:none}#quick-send{flex-wrap:wrap}#quick-send .chat-send-status{flex-basis:100%}
+
+.msg .rich-message p{white-space:normal;margin:.55em 0}
+.rich-message>:first-child{margin-top:0}.rich-message>:last-child{margin-bottom:0}
+.rich-message a{color:var(--accent);text-underline-offset:.16em}
+.rich-message h1,.rich-message h2,.rich-message h3{font-size:1.15em;margin:.95em 0 .35em}
+.rich-message ul,.rich-message ol{padding-inline-start:1.45em}
+.rich-message blockquote{margin:.6em 0;padding-inline-start:.85em;border-inline-start:3px solid var(--line);color:var(--sub)}
+.rich-message code,.rich-message pre{background:var(--wash);border-radius:5px}
+.rich-message code{padding:.1em .3em}
+.rich-message pre{padding:10px 12px;max-width:100%;overflow:auto;white-space:pre}
+.rich-message pre code{padding:0;background:transparent}
+.message-table{max-width:100%;overflow-x:auto;margin:.7em 0}
+.message-table table{border-collapse:collapse;width:max-content;min-width:min(100%,22rem)}
+.message-table th,.message-table td{border:1px solid var(--line);padding:6px 10px;text-align:start;max-width:28rem}
+.message-table th{background:var(--wash)}
+
+.proposal-fields{display:grid;grid-template-columns:minmax(80px,auto) minmax(0,1fr);gap:4px 12px;margin:8px 0}
+.proposal-fields dt{color:var(--sub)}.proposal-fields dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.proposal-policy summary{cursor:pointer;font-weight:600}
+
+.project-dashboard{display:grid;flex:1;min-height:0;grid-template-columns:minmax(0,1fr) minmax(245px,28%);grid-template-areas:"dashboard sidebar"}
+.project-dashboard>.body{grid-area:dashboard;min-width:0}
+.project-sidebar{grid-area:sidebar;min-width:0;overflow:auto}
+.project-sidebar section+section{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.project-sidebar h2{font-size:15px;margin:0 0 8px}
+.project-sidebar dt{color:var(--sub);font-size:12px;margin-top:9px}
+.project-sidebar dd{margin:2px 0 0;overflow-wrap:anywhere}
+.project-sidebar a{color:var(--accent)}
+@media(max-width:850px){
+ .project-dashboard{display:flex;flex-direction:column;overflow:auto}
+ .project-dashboard>.body,.project-sidebar{overflow:visible}
+ .project-sidebar{border-left:0;border-bottom:1px solid var(--line);padding-bottom:16px}
+}
+
+.conversation .msg{margin:0 0 24px}
+.conversation .msg.user{margin-bottom:30px}
+.conversation .msg.agent+.msg.user{margin-top:42px}
+.conversation .msg.event{margin-bottom:16px}
+.quick-log .msg.agent+.msg.user{margin-top:22px}
+@media(max-width:740px){
+ .conversation .msg.user{margin-bottom:24px}
+ .conversation .msg.agent+.msg.user{margin-top:32px}
+}
+.plan-create input[name=title]{font-size:18px;font-weight:650}
+.plan-create textarea{min-height:120px}
+.plan-create-properties{display:flex;gap:12px;align-items:flex-end;margin-bottom:14px}
+.plan-create-properties label{margin:0}.plan-create-properties .pill{margin-bottom:6px}
+.turn-actions{display:flex;justify-content:flex-end;gap:4px;margin-top:-18px}
+.turn-actions button{color:var(--sub);min-width:30px;padding:1px 5px;font-size:16px}
+.turn-edit{margin:0 0 24px auto;max-width:86%}
+.turn-edit textarea{width:100%;min-height:82px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);resize:vertical}
+.turn-edit .flex{justify-content:flex-end;margin-top:6px}
+.research-chat .research-update .content{flex:1}
+.research-chat .research-report{margin:0;padding:0;border:0;background:transparent}
+.research-update details summary{cursor:pointer;color:var(--accent)}
 </style>
 <header class="top"><strong>TripSci</strong></header>
 <div id="app" class="shell"><aside class="side" id="side"></aside><main class="work" id="main"></main></div>
 <div id="quick-chat"></div><dialog id="modal"></dialog><div class="notifier" id="notice" role="status" hidden></div>
+<script src="/markdown-it.min.js" defer></script>
 <script src="/workspace.js" defer></script></html>

@@ -7,12 +7,21 @@ from urllib.parse import urlparse
 import iris
 import beans
 import name_llm
+from main_chat import DEFAULT_PERMISSIONS, SUPERVISOR_ID, supervisor_definition
+from run_workspace import write_json, write_text
+from research.planner import SKILL as SCIENTIFIC_SKILL
 import uuid
 
 MODES = {"local": (), "hybrid": ("training_host", "delivery"),
          "remote": ("agent_host", "remote_dir")}
 COMMON = ("name", "repo", "baseline", "dataset", "train", "evaluate")
 
+
+DEFAULT_AGENT = {
+    "id": "worker", "name": "研究 Worker", "runtime": "local-process",
+    "instructions": "比较模拟 CTR 平滑策略；遵守计划护栏。",
+    "skills": ["adaptive-ctr"], "version": 1,
+}
 
 def runtimes():
     specs=(("codex","Codex"),("claude","Claude Code"),("gemini","Gemini CLI"),("opencode","OpenCode"),("aider","Aider"))
@@ -31,10 +40,44 @@ def runtimes():
 class WorkspaceAPI:
     def __init__(self, project, manager):
         self.p, self.manager = project, manager
+        with self.p.tx() as db:
+            supervisor = self.p.get(db, "agent", SUPERVISOR_ID)
+            if not supervisor:
+                previous = self.p.get(db, "agent_permissions", SUPERVISOR_ID)
+                self.save_agent(db, supervisor_definition(previous))
+                db.execute("DELETE FROM records WHERE kind=? AND id=?", ("agent_permissions", SUPERVISOR_ID))
+            else:
+                instructions = supervisor_definition()["instructions"]
+                if supervisor["instructions"] != instructions:
+                    self.save_agent(db, dict(supervisor, instructions=instructions, version=supervisor["version"] + 1))
+            if not self.p.get(db, "agent", "worker"):
+                self.save_agent(db, DEFAULT_AGENT)
+
+    def save_agent(self, db, agent):
+        row = dict(agent)
+        directory = self.p.root / "agents" / row["id"] / f'v{row["version"]}'
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "AGENTS.md"
+        write_text(path, row["instructions"] + "\n")
+        row["instructions_path"] = str(path.relative_to(self.p.root))
+        return self.put(db, "agent", row)
+
+    def save_project_config(self, db, config):
+        relative = Path("projects") / config["id"]
+        directory = self.p.root / relative
+        if directory.resolve() != directory:
+            raise ValueError("项目管理目录不能指向其他位置。")
+        path = directory / f'config-v{config["version"]}.json'
+        row = dict(config, managed_dir=str(relative), config_path=str(path.relative_to(self.p.root)))
+        try:
+            write_json(path, row)
+        except OSError as exc:
+            raise ValueError("无法写入 TripSci 管理的项目目录，请检查本机存储权限。") from exc
+        return self.put(db, "workspace", row)
 
     def get(self, db, kind, key):
         row = self.p.get(db, kind, key)
-        if row is None:
+        if row is None or self.p.archived(db, kind, row):
             raise ValueError(f"{kind} 不存在。")
         return row
 
@@ -50,13 +93,19 @@ class WorkspaceAPI:
         return dict(title=plan["title"], goal=task["goal"], baseline=task["baseline"], primary=primary,
                     baseline_value=task.get("baseline_metrics", {}).get(primary), budget=task["max_experiments"],
                     runs=runs, candidate=winners[-1] if winners else None, decision=plan["decision"],
-                    dataset=task["constraints"]["dataset"], agent=task["agent"], holdout=plan.get("holdout"))
+                    dataset=task["constraints"]["dataset"], agent=task["agent"], holdout=plan.get("holdout"),
+                    research_summary=task.get("research_summary"))
 
     def state(self, db):
         data = {k: self.p.all(db, k) for k in ("workspace", "plan", "thread", "agent", "task", "job", "experiment", "progress", "inbox", "tool", "skill", "integration")}
-        if not any(x["id"]=="worker" for x in data["agent"]):
-            data["agent"].insert(0,{"id":"worker", "name":"研究 Worker", "runtime":"local-process",
-                              "instructions":"比较模拟 CTR 平滑策略；遵守计划护栏。", "skills":["adaptive-ctr"], "version":1})
+        archived_projects = {row["id"] for row in data["workspace"] if row.get("archived")}
+        data["workspace"] = [row for row in data["workspace"] if not row.get("archived")]
+        data["plan"] = [row for row in data["plan"]
+                        if not row.get("archived") and row.get("workspace") not in archived_projects]
+        data["agent"].sort(key=lambda row: row["id"] != SUPERVISOR_ID)
+        for agent in data["agent"]:
+            if agent["id"] == SUPERVISOR_ID:
+                agent["runtime_detected"] = bool(shutil.which(agent["runtime"]))
         data["runtimes"] = runtimes()
         data["settings"] = self.p.get(db, "settings", "active")
         tasks = {x["id"]: x for x in data["task"]}
@@ -80,6 +129,16 @@ class WorkspaceAPI:
         op = d.get("op")
         uid = lambda: uuid.uuid4().hex[:12]
         s = lambda key, default="", required=False: self.string(d,key,default,required)
+        if op in ("archive_workspace", "archive_plan"):
+            kind = "workspace" if op == "archive_workspace" else "plan"
+            row = self.get(db, kind, s("id", required=True))
+            plans = [row] if kind == "plan" else [
+                plan for plan in self.p.all(db, "plan") if plan.get("workspace") == row["id"]]
+            for plan in plans:
+                task = self.p.get(db, "task", plan.get("task")) or {}
+                if task.get("status") in ("ready", "waiting"):
+                    raise ValueError("还有实验在运行，请先暂停研究计划再删除。")
+            return self.put(db, kind, dict(row, archived=True))
         if op == "integration":
             env = self.get(db, "workspace", s("workspace", required=True))
             plans = d.get("plans")
@@ -116,18 +175,25 @@ class WorkspaceAPI:
             return {"plans":[self.action(db,{**row,"op":"start"}) for row in rows]}
         if op == "import_name_llm":
             manifest=name_llm.latest(self.p.root)
-            existing=next((x for x in self.p.all(db,"workspace") if x.get("adapter")=="name-llm" and x["manifest"]==manifest),None)
+            source = s("source_repo")
+            revision = s("source_revision")
+            checkout = s("source_checkout")
+            if source and (urlparse(source).scheme not in ("https", "http") or not urlparse(source).hostname
+                           or not re.fullmatch(r"[0-9a-f]{40}", revision) or not Path(checkout).is_absolute()):
+                raise ValueError("上游代码来源需要仓库 URL、完整 Git 提交和本机目录。")
+            provenance = {"source_repo":source, "source_revision":revision, "source_checkout":checkout} if source else {}
+            existing=next((x for x in self.p.all(db,"workspace") if not x.get("archived") and x.get("adapter")=="name-llm" and x["manifest"]==manifest and all(x.get(k)==v for k,v in provenance.items())),None)
             if existing:
                 return existing
             score=name_llm.evaluate(self.p.root,manifest,name_llm.BASELINE)
-            return self.put(db,"workspace",dict(id=uid(),name="Name That LLM"+(" · 合成测试" if manifest["fixture"] else " · Kaggle"),
+            return self.save_project_config(db,dict(id=uid(),name=s("name") or "Name That LLM"+(" · 合成测试" if manifest["fixture"] else " · Kaggle"),
                 repo=name_llm.SOURCE,baseline="词频余弦质心",dataset="ntl-"+manifest["sha256"][:10],
                 train="本机文本分类",evaluate="按 prompt_id 分组 · Balanced Accuracy",
                 version=1,mode="local",floor=max(0,round(score["accuracy"]-.01,6)),adapter="name-llm",
-                manifest=manifest,baseline_metrics=score))
+                manifest=manifest,baseline_metrics=score,**provenance))
         if op == "import_beans":
             name=s("name") or "Dry Bean · 豆类品种分类"
-            existing=next((x for x in self.p.all(db,"workspace") if x.get("adapter")=="beans" and x["name"]==name),None)
+            existing=next((x for x in self.p.all(db,"workspace") if not x.get("archived") and x.get("adapter")=="beans" and x["name"]==name),None)
             if existing:
                 return existing
             data=beans.dataset()
@@ -136,11 +202,14 @@ class WorkspaceAPI:
                 train="本机独立 CPU 训练进程",evaluate="固定分层验证集 · macro F1 / accuracy",
                 version=1,mode="local",floor=round(beans.baseline()["accuracy"]-.01,6),adapter="beans"))
         if op == "import_iris":
-            existing=next((x for x in self.p.all(db,"workspace") if x.get("adapter")=="iris"),None)
+            existing=next((x for x in self.p.all(db,"workspace") if not x.get("archived") and x.get("adapter")=="iris"),None)
             if existing:
-                return next(x for x in self.p.all(db,"plan") if x["workspace"]==existing["id"])
+                plan = next((x for x in self.p.all(db,"plan")
+                             if x["workspace"]==existing["id"] and not x.get("archived")), None)
+                if plan:
+                    return plan
             data=iris.dataset()
-            env=self.put(db,"workspace",dict(id=uid(),name="Iris 鸢尾花分类",repo=iris.SOURCE,baseline="k=11 · 未缩放",
+            env=existing or self.put(db,"workspace",dict(id=uid(),name="Iris 鸢尾花分类",repo=iris.SOURCE,baseline="k=11 · 未缩放",
               dataset="uci-iris-"+data["sha256"][:8],train="内置 kNN",evaluate="固定验证集 · macro F1 / accuracy",
               version=1,mode="local",floor=.85,adapter="iris"))
             return self.put(db,"plan",dict(id=uid(),title="改进 Iris 分类器",direction="比较 kNN 邻居数和特征缩放；按验证集 macro F1 选候选。",
@@ -152,15 +221,26 @@ class WorkspaceAPI:
             if kind=="link" and (urlparse(target).scheme not in ("http","https") or not urlparse(target).hostname):
                 raise ValueError("请输入有效的 HTTP/HTTPS 链接。")
             return self.put(db,"tool",dict(id=uid(),name=s("name",required=True),kind=kind,target=target))
+        if op == "agent_skills":
+            agent = self.get(db, "agent", s("id", required=True))
+            skills = d.get("skills")
+            if agent.get("role") != "supervisor":
+                return self.action(db, {**agent, "op":"agent", "skills":skills})
+            catalog = {row["id"]:row for row in self.p.all(db, "skill")}
+            if not isinstance(skills, list) or any(not isinstance(key, str) or key not in catalog for key in skills):
+                raise ValueError("请选择工作区中已有的 Skill。")
+            skills = list(dict.fromkeys(skills))
+            if skills == agent["skills"]:
+                return agent
+            return self.save_agent(db, dict(agent, skills=skills, skill_files=[catalog[key] for key in skills],
+                                            version=agent["version"] + 1))
         if op == "skill":
             row = dict(id=uid(), name=s("name", required=True), markdown=s("markdown", required=True))
             target = s("agent")
             if target:
-                agent = next((a for a in self.state(db)["agent"] if a["id"] == target), None)
-                if not agent:
-                    raise ValueError("请选择要分配的智能体。")
+                agent = self.get(db, "agent", target)
                 self.put(db, "skill", row)
-                self.action(db, {**agent, "op": "agent", "skills": [*agent["skills"], row["id"]]})
+                self.action(db, {"id":target, "op":"agent_skills", "skills":[*agent["skills"], row["id"]]})
                 return row
             return self.put(db, "skill", row)
         if op in ("workspace", "check"):
@@ -176,7 +256,7 @@ class WorkspaceAPI:
                 return {"message":"模拟配置通过。未连接服务器，也未验证实际仓库、命令或数据。"}
             key = s("id") or uid()
             old = self.p.get(db,"workspace",key)
-            if s("id") and not old: raise ValueError("找不到要编辑的项目。")
+            if s("id") and (not old or old.get("archived")): raise ValueError("找不到要编辑的项目。")
             if old and old.get("adapter") in ("iris","beans","name-llm"): raise ValueError("公开数据集项目使用固定数据与评测协议。")
             plan_id=s("attach_plan")
             if plan_id:
@@ -185,12 +265,23 @@ class WorkspaceAPI:
                     raise ValueError("只能为尚未启动的计划新建并关联项目。")
                 plan["workspace"]=key
                 self.put(db,"plan",plan)
-            return self.put(db,"workspace",dict(config,id=key,version=1 if not old else old["version"]+1))
+            return self.save_project_config(db, dict(config,id=key,version=1 if not old else old["version"]+1))
+        if op == "agent_permissions":
+            permissions = d.get("permissions")
+            if (d.get("id") != SUPERVISOR_ID or not isinstance(permissions, dict)
+                    or not permissions or permissions.keys() - DEFAULT_PERMISSIONS.keys()
+                    or any(type(value) is not bool for value in permissions.values())):
+                raise ValueError("无效的智能体权限配置。")
+            agent = self.get(db, "agent", SUPERVISOR_ID)
+            permissions = {**agent["permissions"], **permissions}
+            if agent["permissions"] == permissions:
+                return agent
+            return self.save_agent(db, dict(agent, permissions=permissions, version=agent["version"] + 1))
         if op == "agent":
             key = s("id") or uid()
+            if key == SUPERVISOR_ID:
+                raise ValueError("研发主管的内置角色指令由 TripSci 管理。")
             old = self.p.get(db,"agent",key)
-            if not old and key=="worker":
-                old={"version":1}
             if s("id") and not old:
                 raise ValueError("找不到要编辑的智能体。")
             skills = d.get("skills",["adaptive-ctr"])
@@ -202,11 +293,7 @@ class WorkspaceAPI:
                 raise ValueError("请选择已检测到的运行时。")
             name, instructions = s("name",required=True), s("instructions")
             version=1 if not old else old["version"]+1
-            directory=self.p.root/"agents"/key/f"v{version}"
-            directory.mkdir(parents=True,exist_ok=True)
-            path=directory/"AGENTS.md"
-            path.write_text(instructions+"\n",encoding="utf-8")
-            return self.put(db,"agent",{"id":key,"name":name,"instructions":instructions,"instructions_path":str(path.relative_to(self.p.root)),
+            return self.save_agent(db, {"id":key,"name":name,"instructions":instructions,
                                         "runtime":runtime,"skills":skills,"skill_files":[catalog[x] for x in skills if x in catalog],"version":version})
         if op == "plan":
             key=s("workspace")
@@ -217,32 +304,7 @@ class WorkspaceAPI:
                 thread=self.get(db,"thread",source)
                 messages.append({"role":"event","text":"来源聊天："+thread["title"]})
             return self.put(db,"plan",{"id":uid(),"title":s("title",required=True),"direction":s("direction",required=True),
-                                       "workspace":key,"task":"","messages":messages,"decision":""})
-        if op == "message":
-            msg=s("text",required=True)
-            key=s("plan")
-            if key:
-                plan=self.get(db,"plan",key)
-                task=self.p.get(db,"task",plan["task"])
-                if task and task["status"] == "completed":
-                    reply = "实验已结束。下方附有实验报告；可以评审候选，或从报告调整 Worker 的后续工作方式。"
-                elif task:
-                    finished = sum(r["task"] == task["id"] for r in self.p.all(db, "experiment"))
-                    reply = f"已完成 {finished} 轮。"+("持续迭代中。" if task.get("continuous") else f"总预算 {task['max_experiments']} 轮。")+"可通过右栏管理实验。"
-                else:
-                    reply = "可以先确定可检验的假设、对照基线、主要指标和不允许退化的护栏。讨论完成后，把约定填入「确认实验计划」再启动。"
-                row=plan
-            else:
-                key=s("thread") or uid()
-                row=self.p.get(db,"thread",key) or {"id":key,"title":msg[:30],"messages":[]}
-                reply="可在这段聊天里梳理研究方向，或把讨论整理成研究计划草稿。"
-                if "skill" in msg.lower():
-                    reply="Skill 草案：读取实验记录，按锁定的 overall_auc 护栏检查，并引用原始结果。"
-                elif "进度" in msg or "阻塞" in msg:
-                    rows=self.p.all(db,"task")
-                    reply=f"共有 {len(rows)} 项已启动的研究，{sum(x['status']=='waiting' for x in rows)} 项正在等训练结果。"
-            row["messages"] += [{"role":"user","text":msg},{"role":"agent","text":reply}]
-            return self.put(db,"plan" if s("plan") else "thread",row)
+                                       "workspace":key,"source":source,"task":"","messages":messages,"decision":""})
         if op == "settings":
             delay, slots=d.get("delay"),d.get("slots")
             if type(delay) not in (int,float) or not .2<=delay<=60 or type(slots) is not int or not 1<=slots<=8:
@@ -262,10 +324,18 @@ class WorkspaceAPI:
         elif op=="start":
             if plan["task"]: raise ValueError("计划已启动。")
             env=self.get(db,"workspace",plan["workspace"])
-            agent=next((x for x in self.state(db)["agent"] if x["id"]==s("agent","worker")),None)
+            agent=self.p.get(db,"agent",s("agent","worker"))
             if not agent: raise ValueError("请选择执行智能体。")
             if agent["runtime"]!="local-process": raise ValueError("外部运行时目前仅检测和配置；执行请选择 TripSci Worker。")
-            continuous=d.get("run_mode")=="continuous"
+            research_mode=s("research_mode","rules")
+            if research_mode not in ("rules","codex"):
+                raise ValueError("未知研究决策模式。")
+            if research_mode=="codex" and (env.get("adapter") not in ("mock", "name-llm") or env.get("mode")!="local" or not shutil.which("codex")):
+                raise ValueError("Codex 自主研究需要本机 Codex CLI，并支持本机模拟评测和 Name That LLM。")
+            run_mode = d.get("run_mode", "bounded")
+            if run_mode not in ("bounded", "continuous"):
+                raise ValueError("未知实验运行模式。")
+            continuous = run_mode == "continuous"
             strategy=s("strategy","adaptive")
             interval=d.get("interval",30)
             ntl=env.get("adapter")=="name-llm"
@@ -276,14 +346,16 @@ class WorkspaceAPI:
             if continuous and (env.get("adapter")!="beans" or strategy!="adaptive" or type(interval) is not int or not 2<=interval<=3600):
                 raise ValueError("持续迭代仅支持 Dry Bean 自适应策略，间隔 2–3600 秒。")
             budget=1 if continuous else d.get("budget")
-            cap=20 if ntl else 10
+            cap=20 if ntl and research_mode=="rules" else 10
             if type(budget) is not int or not 1<=budget<=cap: raise ValueError(f"预算必须为 1–{cap} 轮。")
             key=self.manager.create(db,s("design") or plan["direction"],budget,cap)
             task=self.get(db,"task",key)
-            task.update(workspace=env["id"],environment=copy.deepcopy(env),agent=copy.deepcopy(agent),
+            task.update(research_mode=research_mode,workspace=env["id"],environment=copy.deepcopy(env),agent=copy.deepcopy(agent),
                         plan=plan["id"],baseline=env["baseline"] if env.get("adapter") in ("iris","beans","name-llm") else s("baseline") or env["baseline"])
             task["constraints"].update(overall_auc_floor=env["floor"],dataset=env["dataset"])
             task["settings"]["skills"]=agent["skills"]
+            if research_mode=="codex":
+                task["scientific_skill"] = SCIENTIFIC_SKILL.read_text(encoding="utf-8")
             if env.get("adapter")=="iris":
                 task["best"]=iris.evaluate(iris.dataset(),*iris.BASELINE)
                 task["constraints"]["primary_metric"]="macro_f1"

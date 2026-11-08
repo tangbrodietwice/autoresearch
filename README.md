@@ -44,3 +44,27 @@ python3 scripts/run-name-llm.py --url http://127.0.0.1:8776 --output /tmp/tripsc
 ```
 
 导入器按文件哈希锁定数据；原文保存在服务状态目录，项目 Git 仅记录协议和候选配置。脚本并行启动字符 n-gram（4 轮）、文体与标点（4 轮）和按验证结果自适应搜索（20 轮）。按 `prompt_id` 分组切训练、验证和本地保留测试，主指标为 Balanced Accuracy。它不提交 Kaggle，保留测试分数也不是榜单成绩。
+
+### 浏览本机研究文件
+
+`python3 scripts/export-workspace.py` 将当前 Web 工作区导出到仓库根目录的 `workspace-data/`。打开其中的 `README.md` 可以找到智能体指令、自定义 Skills、项目和计划配置、逐轮实验数据，以及原始 Git 工作区和报告链接。导出目录被 Git 忽略。
+
+Web 默认状态保存在 `.state/web`。可用 `--state` 指定其他状态目录，`--output` 指定独立的导出位置。SQLite 仍是运行状态的来源，导出是按需生成的快照。
+
+### 单轮运行目录
+
+`backend/app.py` 负责 HTTP 和调度，`backend/storage.py` 管理 SQLite 与 Git 工件，`backend/runtime.py` 启动本机 Worker 和训练进程。`backend/run_workspace.py` 管理可复查的运行目录。
+
+新提交的实验会在状态目录下生成 `runs/<job-id>/`，包含运行清单、候选代码或参数、评测协议、完成后的报告和结果。有关联智能体时还会记录启动时的 `AGENTS.md` 和已绑定的自定义 `skills/<id>/SKILL.md`。本机独立训练进程的回执和日志按尝试号存放于 `attempts/`。旧实验仍可通过原有 Git 工作区查看。
+
+当前内置 Worker 依靠已实现的搜索策略执行实验。指令与自定义 Skill 文件是运行快照。
+
+### Codex 研究决策试验
+
+在本机模拟项目中启动研究计划时，可以选择「Codex 研究决策（模拟评测）」。这需要本机已登录的 Codex CLI，研究目标、相关实验摘要、已绑定的指令与 Skill 文本会作为决策上下文传给 Codex。评测仍是模拟 CTR，决策范围是平滑强度，训练提交仍受服务端的预算、指标和项目配置约束。
+
+Codex 决策在独立进程运行，训练等待时不调用模型。每轮保存假设、反证条件、引用的历史和结果分析。在运行目录的清单里可查看候选和上下文引用。普通工作区对话仍使用既有回复逻辑。
+
+### TripSci 研发主管
+
+工作区聊天和研究计划对话由本机已登录的 Codex CLI 执行。主管的角色指令在 `backend/agents/supervisor/AGENTS.md`。对话历史及相关项目和实验摘要会传入模型。主管可以提出项目配置、研究计划、委派、反馈及 Skill 等变更，页面展示操作内容，经确认后由服务端校验并执行。模型超时或启动失败时，界面显示错误并保留输入供重试。

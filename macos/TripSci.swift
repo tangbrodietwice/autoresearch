@@ -59,6 +59,7 @@ struct APIError: LocalizedError { let message: String; var errorDescription: Str
             req.httpMethod = "POST"
             req.setValue("application/json",forHTTPHeaderField:"Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject:payload)
+            if payload["op"] as? String == "message" { req.timeoutInterval = 95 }
         }
         let (bytes,response) = try await session.data(for:req)
         let row = try JSONSerialization.jsonObject(with:bytes) as? Record ?? [:]

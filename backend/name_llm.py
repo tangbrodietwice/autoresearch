@@ -113,35 +113,49 @@ def features(text,cfg):
     return result
 
 
-def evaluate(root, manifest, cfg, split="validation"):
+def evaluate(root, manifest, cfg, split="validation", diagnostics=None):
     data=dataset(root,manifest["sha256"],manifest.get("fixture",False))
     centroid=defaultdict(Counter)
     for text,label in data["train"]:
         centroid[label].update(features(text,cfg))
     labels=sorted(centroid)
     inverse=defaultdict(list)
-    for i,label in enumerate(labels):
-        row=centroid[label]
-        norm=math.sqrt(sum(v*v for v in row.values())) or 1
-        for k,v in row.items():
-            inverse[k].append((i,v/norm))
-    totals, hits=Counter(),Counter()
+    classifier=cfg.get("classifier","centroid")
+    if classifier=="multinomial_nb":
+        vocabulary=set().union(*(row.keys() for row in centroid.values()))
+        denominators=[sum(centroid[label].values())+len(vocabulary) for label in labels]
+        offsets=[-math.log(value) for value in denominators]
+        for i,label in enumerate(labels):
+            for key,value in centroid[label].items():
+                inverse[key].append((i,math.log1p(value)))
+    else:
+        for i,label in enumerate(labels):
+            row=centroid[label]
+            norm=math.sqrt(sum(v*v for v in row.values())) or 1
+            for k,v in row.items():
+                inverse[k].append((i,v/norm))
+    totals, hits, confusion=Counter(),Counter(),Counter()
     for text,target in data[split]:
-        scores=[0.0]*len(labels)
-        for k,v in features(text,cfg).items():
+        values=features(text,cfg)
+        if classifier=="multinomial_nb":
+            mass=sum(v for k,v in values.items() if k in vocabulary)
+            scores=[mass*offset for offset in offsets]
+        else:
+            scores=[0.0]*len(labels)
+        for k,v in values.items():
             for i,w in inverse.get(k,()):
                 scores[i]+=v*w
         chosen=labels[max(range(len(labels)),key=scores.__getitem__)]
         totals[target]+=1
         hits[target]+=chosen==target
+        confusion[target,chosen]+=1
+    if diagnostics is not None:
+        diagnostics.update(split=split, sample_counts={name:len(rows) for name,rows in data.items()},
+                           split_seed=173, group_key="prompt_id",
+                           recalls={label:{"correct":hits[label],"total":totals[label]} for label in labels},
+                           confusion={label:{guess:confusion[label,guess] for guess in labels} for label in labels})
     return {"balanced_accuracy":round(sum(hits[k]/totals[k] for k in labels)/len(labels),6),
             "accuracy":round(sum(hits.values())/sum(totals.values()),6)}
-
-
-def train(root, repo, job):
-    manifest=json.loads((repo/"evaluation/name-llm-protocol.json").read_text())
-    config=json.loads((repo/"models"/(job+".json")).read_text())
-    return evaluate(root,manifest,config)
 
 
 if __name__=="__main__":

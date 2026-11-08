@@ -6,9 +6,10 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from app import MainAgent, MockTraining, Project, ResearchWorker, RuntimeAdapter, TaskManager
+from app import MockTraining, Project, ResearchWorker, RuntimeAdapter, TaskManager
 
 ROOT = Path(__file__).resolve().parent
 
@@ -99,9 +100,16 @@ class ResearchTest(unittest.TestCase):
             record = project.get(db,"experiment",first+"-1")
         self.assertEqual(record["report_commit"],revision)
         self.assertIn(record["revision"],project.git("show",revision+":"+record["report"]))
+        from run_workspace import recover_results
+        directory = self.root / record["run_path"]
+        (directory / "result.json").unlink()
+        (directory / "report.md").unlink()
+        recover_results(project)
+        self.assertEqual(json.loads((directory / "result.json").read_text()), record)
+        self.assertIn(record["revision"], (directory / "report.md").read_text())
 
     def test_training_attempt_failures_are_isolated_and_bounded(self):
-        import beans
+        from run_workspace import attempt_dir
         project = Project(self.root)
         manager = TaskManager(project)
         manager.training_retry_delay = 0
@@ -112,7 +120,7 @@ class ResearchTest(unittest.TestCase):
             def launch_training(self, workspace, job_id, adapter, number):
                 if number==1:
                     raise OSError(2,"injected launch failure")
-                directory=beans.attempt_dir(self.root,job_id,number)
+                directory=attempt_dir(self.root,job_id,number)
                 directory.mkdir(parents=True)
                 if number==2:
                     (directory/"result.json").write_text("{broken")
@@ -143,7 +151,95 @@ class ResearchTest(unittest.TestCase):
             self.assertEqual([a["error_code"] for a in project.get(db,"job","broken-1")["attempts"]],
                              ["launch_failed","invalid_receipt","timeout","missing_receipt"])
             self.assertIn(project.get(db,"task",healthy)["status"],("waiting","completed"))
-        self.assertTrue((beans.attempt_dir(self.root,"broken-1",2)/"result.json").exists())
+        self.assertTrue((attempt_dir(self.root,"broken-1",2)/"result.json").exists())
+
+    def test_research_uses_history_and_records_agent_analysis(self):
+        from research import planner
+        project = Project(self.root)
+        worker = ResearchWorker(project)
+        with project.tx() as db:
+            key = worker.manager.create(db,"Study smoothing",2)
+            task = project.get(db,"task",key)
+            task["research_mode"] = "codex"
+            project.put(db,"task",key,task)
+
+        seen = []
+        def fake_decision(root, context):
+            seen.append(context)
+            result = context["result"]
+            proposal = None
+            if context["round"] < context["budget"]:
+                proposal = dict(strength=.25 + .1*context["round"],hypothesis="Smoothing helps",
+                                expected="Higher low-frequency AUC",disconfirming_result="No improvement",
+                                rationale="Compare against the previous run",history_refs=[result["id"]] if result else [])
+            analysis = dict(observations="Measured change",alternative_explanation="Synthetic metric response",
+                            next_step="Check neighboring strength",level="inconclusive") if result else None
+            decision = dict(proposal=proposal,analysis=analysis)
+            planner.validate(decision,context)
+            return decision
+
+        with patch.object(planner,"decide",side_effect=fake_decision):
+            for round_no in range(3):
+                worker.run(key)
+                if round_no < 2:
+                    with project.tx() as db:
+                        task = project.get(db,"task",key)
+                        job = project.get(db,"job",task["pending_job"])
+                        job["result"] = MockTraining.poll(job,job["ready_at"])
+                        project.put(db,"job",job["id"],job)
+                        task["status"] = "ready"
+                        project.put(db,"task",key,task)
+                        if round_no==0:
+                            worker.manager.feedback(db,key,"请检查替代解释")
+        with project.tx(readonly=True) as db:
+            experiments = project.all(db,"experiment")
+            self.assertEqual(project.get(db,"task",key)["status"],"completed")
+        self.assertEqual(len(experiments),2)
+        self.assertEqual(experiments[1]["research_proposal"]["history_refs"],[experiments[0]["id"]])
+        self.assertEqual(experiments[1]["research_analysis"]["level"],"inconclusive")
+        self.assertEqual(seen[1]["feedback"][0]["message"],"请检查替代解释")
+        invalid = fake_decision(self.root,seen[1])
+        invalid["proposal"]["strength"] = .25
+        with self.assertRaises(ValueError):
+            planner.validate(invalid,seen[1])
+
+    def test_paused_task_defers_pending_dispatch_and_reuses_attempt(self):
+        project = Project(self.root)
+        manager = TaskManager(project)
+        launched = []
+
+        class RecordingRuntime(RuntimeAdapter):
+            def launch_training(self, workspace, job_id, adapter, number):
+                launched.append((job_id, number))
+
+        with project.tx() as db:
+            key = manager.create(db, "Verify dispatch recovery", 1)
+            task = project.get(db, "task", key)
+            task.update(status="paused", workspace="local", pending_job="job-1")
+            manager.save(db, task, "Paused before dispatch")
+            project.put(db, "job", "job-1", {"id":"job-1", "adapter":"beans", "ready_at":0,
+                        "attempts":[{"number":1,"state":"dispatch_pending","requested_at":0}]})
+        manager.tick(RecordingRuntime(self.root))
+        self.assertEqual(launched, [])
+        with project.tx() as db:
+            manager.feedback(db, key, "resume")
+        manager.tick(RecordingRuntime(self.root))
+        self.assertEqual(launched, [("job-1", 1)])
+        with project.tx(readonly=True) as db:
+            attempts = project.get(db, "job", "job-1")["attempts"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["state"], "running")
+
+    def test_candidate_paths_reject_protected_files_and_symlink_escape(self):
+        from storage import CONSTRAINTS
+        project = Project(self.root)
+        outside = self.root / "outside"
+        outside.mkdir()
+        (project.repo / "models").symlink_to(outside, target_is_directory=True)
+        for path in ("models/run.py", "models/../outside.py", "evaluation/protocol.json"):
+            with self.assertRaises(ValueError):
+                project.validate_candidate_path(path, CONSTRAINTS)
+        self.assertFalse(any(outside.iterdir()))
 
     def test_contract_and_mock(self):
         p = Project(self.root)
@@ -162,12 +258,11 @@ class ResearchTest(unittest.TestCase):
         m = TaskManager(p)
         with p.tx() as db:
             p.put(db,'settings','active',{'runtime':'local-process','skills':['adaptive-ctr','wide-search'],'delay':.1})
-            main = MainAgent(m)
-            key = main.reply(db, {'action':'delegate','message':'CTR','budget':10})['task']
+            key = m.create(db, 'CTR', 10)
         m.tick(RuntimeAdapter(self.root))
         with p.tx() as db:
             self.assertEqual(p.get(db,'task',key)['status'],'waiting')
-            main.reply(db, {'action':'feedback','task':key,'message':'保守'})
+            m.feedback(db, key, '保守')
         for _ in range(10):
             time.sleep(.12)
             m.tick(RuntimeAdapter(self.root))
@@ -191,7 +286,7 @@ class ResearchTest(unittest.TestCase):
             proc.stdout.close()
 
         def start():
-            proc = subprocess.Popen([sys.executable,str(ROOT/'app.py'),'--state',str(self.root),'--port','0'],
+            proc = subprocess.Popen([sys.executable,str(ROOT.parent/'tests/chat_fixture_server.py'),'--state',str(self.root),'--port','0'],
                                     stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
             self.addCleanup(stop,proc)
             address = proc.stdout.readline().strip()
@@ -212,14 +307,25 @@ class ResearchTest(unittest.TestCase):
             self.fail('Timed out waiting for expected state')
 
         proc, api = start()
-        key = api('/api/chat',{'action':'delegate','message':'提升低频 CTR','budget':3})['task']
-        state = lambda: api('/api/state')
+        with self.assertRaises(HTTPError) as legacy:
+            api('/api/chat', {'action':'delegate','message':'提升低频 CTR','budget':3})
+        self.assertEqual(legacy.exception.code, 410)
+        with self.assertRaises(HTTPError) as legacy:
+            api('/api/settings', {'delay':.1})
+        self.assertEqual(legacy.exception.code, 410)
+        workspace = api('/v1/action', dict(op='workspace', name='CTR', repo='fixture', baseline='v1',
+                                          dataset='synthetic-v1', train='train.py', evaluate='eval.py',
+                                          mode='local', floor=.715))
+        plan = api('/v1/action', dict(op='plan', title='CTR', direction='提升低频 CTR', workspace=workspace['id']))
+        api('/v1/action', dict(op='start', id=plan['id'], budget=3))
+        state = lambda: api('/v1/state')
         current = lambda: state()['task'][0]
         job = until(lambda: current()['pending_job'])
-        api('/api/chat',{'action':'feedback','task':key,'message':'pause'})
+        api('/v1/action', dict(op='pause', id=plan['id']))
         self.assertEqual(current()['status'],'paused')
-        self.assertIn('paused',api('/api/chat',{'message':'进展？','task':key})['reply'])
-        api('/api/chat',{'action':'feedback','task':key,'message':'resume'})
+        reply = api('/v1/action', dict(op='message', plan=plan['id'], text='进展？'))
+        self.assertIn('paused', reply['messages'][-1]['text'])
+        api('/v1/action', dict(op='resume', id=plan['id']))
         self.assertEqual(current()['pending_job'],job)
         stop(proc)
         _, api = start()
@@ -227,5 +333,5 @@ class ResearchTest(unittest.TestCase):
         result = state()
         self.assertEqual([x['round'] for x in result['experiment']],[1,2,3])
         self.assertEqual(result['experiment'][0]['id'],job)
-        self.assertEqual(len(result['chat']),8)
+        self.assertEqual([m['role'] for m in result['plan'][0]['messages'] if m['role'] in ('user','agent')], ['user','agent'])
         self.assertTrue(all(x['consumed'] for x in result['inbox']))

@@ -24,7 +24,7 @@ def serve(stack,*args):
 
 with ExitStack() as stack:
     state=stack.enter_context(tempfile.TemporaryDirectory())
-    backend=serve(stack,"backend/app.py","--state",state,"--port","0")
+    backend=serve(stack,"tests/chat_fixture_server.py","--state",state,"--port","0")
     web=serve(stack,"frontend/serve.py","--port","0","--backend-port",backend.rsplit(":",1)[1])
     def fetch(path,data=None):
         req=Request(web+path,data=json.dumps(data).encode() if data is not None else None,
@@ -89,6 +89,16 @@ with ExitStack() as stack:
         if item["status"]=="completed": break
         time.sleep(.1)
     assert follow["id"] in item["agent"]["skills"] and item["agent"]["version"]==2
+    experiment=next(e for e in data["experiment"] if e["task"]==item["id"])
+    directory=Path(state)/experiment["run_path"]
+    snapshot=json.loads((directory/"run.json").read_text())
+    assert snapshot["agent"]["version"]==2 and snapshot["revision"]==experiment["revision"]
+    assert (directory/"skills"/follow["id"]/"SKILL.md").read_text()=="# 先冻结数据划分\n"
+    for _ in range(30):
+        if (directory/"result.json").is_file(): break
+        time.sleep(.05)
+    assert json.loads((directory/"result.json").read_text())["id"]==experiment["id"]
+    assert (directory/"report.md").is_file() and (directory/"candidate.py").is_file()
     post("decision",id=other["id"],value="保留候选")
     payload=dict(workspace=project["id"],revision="a"*40,plans=[plan["id"],other["id"]],
                  metrics={"low_freq_auc":.68,"overall_auc":.72},summary="合并版本的固定协议评测")

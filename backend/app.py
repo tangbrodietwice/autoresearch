@@ -1,115 +1,27 @@
 import argparse
-import contextlib
 import hashlib
 import fcntl
 import math
 import json
 import re
 from pathlib import Path
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from main_chat import ChatError, MainChat, codex_chat
 from native_api import WorkspaceAPI
+from runtime import TRAINING_TIMEOUT, RuntimeAdapter
+from storage import CONSTRAINTS, SEED, Project
+from research import planner
+from run_workspace import attempt_dir, prepare, publish_result, recover_results
 import iris
 import beans
 import name_llm
 
 BASE = Path(__file__).resolve().parent
-SEED = {"low_freq_auc": .65, "overall_auc": .72}
-DEFAULT = {"runtime": "local-process", "skills": ["adaptive-ctr"], "delay": 1.5}
-CONSTRAINTS = {"primary_metric": "low_freq_auc", "max_parallel_jobs": 1,
-               "overall_auc_floor": .715, "editable_paths": ["models/"],
-               "protected_paths": ["data/", "evaluation/"], "dataset": "synthetic-v1"}
-
-
-class Project:
-    def __init__(self, root):
-        self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.repo = self.root / "project"
-        self.repo.mkdir(exist_ok=True)
-        self.bootstrap()
-        with self.tx() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, body TEXT, PRIMARY KEY(kind,id))")
-            if not self.get(db, "settings", "active"):
-                self.put(db, "settings", "active", DEFAULT)
-
-    def bootstrap(self):
-        if (self.repo / ".git").exists() and self.git("rev-list", "--all", "--max-count=1"):
-            return
-        self.repo.mkdir(parents=True, exist_ok=True)
-        self.git("init", "-q")
-        files = {
-            "data/synthetic-v1.json": [{"user": i, "frequency": 1+i%5, "click": i%3 == 0} for i in range(30)],
-            "evaluation/protocol.json": CONSTRAINTS,
-            "history.json": [{"name": "baseline", **SEED},
-                             {"name": "historical heavy smoothing", "low_freq_auc": .646, "overall_auc": .719}],
-        }
-        for name, value in files.items():
-            if not (self.repo / name).exists():
-                self.write(name, value)
-        if not self.git("rev-list", "--all", "--max-count=1"):
-            self.commit("Bootstrap synthetic CTR project", *files)
-
-    @contextlib.contextmanager
-    def tx(self, readonly=False):
-        db = sqlite3.connect(self.root / "state.sqlite", timeout=15)
-        try:
-            db.execute("BEGIN" if readonly else "BEGIN IMMEDIATE")
-            with db:
-                yield db
-        finally:
-            db.close()
-
-    def write(self, name, value):
-        path = self.repo / name
-        path.parent.mkdir(exist_ok=True, parents=True)
-        temp = path.with_suffix(".tmp")
-        temp.write_text(value if isinstance(value, str) else json.dumps(value, indent=2), encoding="utf-8")
-        temp.replace(path)
-
-    def git(self, *args):
-        return subprocess.check_output(["git", "-C", str(self.repo), "-c", "user.name=Research Worker",
-                                        "-c", "user.email=worker@localhost", *args], text=True).strip()
-
-    def commit(self, label, *paths):
-        if not paths:
-            raise ValueError("Artifact commit requires explicit paths")
-        self.git("add", "--", *paths)
-        if self.git("diff", "--cached", "--name-only", "--", *paths):
-            self.git("commit", "--only", "-qm", label, "--", *paths)
-            return self.git("rev-parse", "HEAD")
-        expected = [self.git("hash-object", "--", path) for path in paths]
-        for revision in self.git("log", "--format=%H", "--fixed-strings", "--grep="+label, "--", *paths).splitlines():
-            if self.git("show", "-s", "--format=%s", revision) != label:
-                continue
-            try:
-                blobs = [self.git("rev-parse", revision+":"+path) for path in paths]
-            except subprocess.CalledProcessError:
-                continue
-            if blobs == expected:
-                return revision
-        raise RuntimeError(f"Cannot recover artifact revision for {label}")
-
-    @staticmethod
-    def put(db, kind, key, value):
-        db.execute("INSERT INTO records VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",
-                   (kind, key, json.dumps(value, ensure_ascii=False)))
-
-    @staticmethod
-    def get(db, kind, key):
-        row = db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, key)).fetchone()
-        return json.loads(row[0]) if row else None
-
-    @staticmethod
-    def all(db, kind):
-        return [json.loads(row[0]) for row in db.execute("SELECT body FROM records WHERE kind=? ORDER BY rowid", (kind,))]
-
-
 class MockTraining:
     @staticmethod
     def submit(key, revision, strength, delay):
@@ -163,7 +75,7 @@ class TaskManager:
         self.save(db, task, f"Inbox: {message}")
 
     max_training_attempts = 3
-    training_timeout = beans.TRAINING_TIMEOUT
+    training_timeout = TRAINING_TIMEOUT
     training_retry_delay = 1
 
     def training_failure(self, db, task, job, attempt, code, now, detail=None):
@@ -190,9 +102,19 @@ class TaskManager:
         if not attempts and "retry_from" not in job:
             attempts.append({"number":0,"state":"running","started_at":now})
         attempt = attempts[-1] if attempts else None
+        if attempt and attempt["state"] == "dispatch_pending":
+            number = attempt["number"]
+            directory = attempt_dir(self.p.root,job["id"],number)
+            if (directory/"result.json").exists() or runtime.training_locked(directory):
+                attempt.update(state="running",started_at=attempt.get("requested_at",now))
+                self.p.put(db,"job",job["id"],job)
+            else:
+                if task["status"] == "waiting":
+                    launches.append((task["id"],task["workspace"],job["id"],job["adapter"],number))
+                return None
         if attempt and attempt["state"] == "running":
             number = attempt["number"]
-            directory = beans.attempt_dir(self.p.root,job["id"],number)
+            directory = attempt_dir(self.p.root,job["id"],number)
             receipt = directory/"result.json"
             if receipt.exists():
                 try:
@@ -216,6 +138,8 @@ class TaskManager:
                     return None
                 attempt.update(state="succeeded",ended_at=ended)
                 job.update(training_started_at=started,training_ended_at=ended)
+                if payload.get("diagnostics"):
+                    job["diagnostics"] = payload["diagnostics"]
                 return metrics
             exit_code = runtime.training_exit(job["id"],number)
             if exit_code is not None:
@@ -235,11 +159,11 @@ class TaskManager:
                 return None
             # Old jobs had no durable launch record. Reuse a receipt or a held lock if present.
             attempts.pop()
-        if now < job.get("retry_at",0):
+        if task["status"] != "waiting" or now < job.get("retry_at",0):
             return None
         number = attempts[-1]["number"]+1 if attempts else 1
-        attempt = {"number":number,"state":"running","started_at":now,
-                   "log":str(beans.attempt_dir(self.p.root,job["id"],number).relative_to(self.p.root)/"worker.log")}
+        attempt = {"number":number,"state":"dispatch_pending","requested_at":now,
+                   "log":str(attempt_dir(self.p.root,job["id"],number).relative_to(self.p.root)/"worker.log")}
         attempts.append(attempt)
         task["phase"] = "waiting"
         self.p.put(db,"job",job["id"],job)
@@ -268,76 +192,45 @@ class TaskManager:
                 if task["status"] == "ready" and (task.get("pending_job") or now >= task.get("not_before",0)):
                     ready.append((task.get("last_dispatched",0),task["id"]))
         for key, workspace, job_id, adapter, number in launches:
-            try:
-                runtime.launch_training(workspace,job_id,adapter,number)
-            except OSError as exc:
-                with self.p.tx() as db:
-                    task = self.p.get(db,"task",key)
-                    job = self.p.get(db,"job",job_id)
-                    self.training_failure(db,task,job,job["attempts"][-1],"launch_failed",time.time(),exc.errno)
-        for _, key in sorted(ready):
             with self.p.tx() as db:
-                task = self.p.get(db, "task", key)
-                if task["status"] != "ready":
+                task = self.p.get(db,"task",key)
+                job = self.p.get(db,"job",job_id)
+                attempt = job["attempts"][-1]
+                if (task["status"] != "waiting" or task["pending_job"] != job_id
+                        or attempt["number"] != number or attempt["state"] != "dispatch_pending"):
                     continue
-                if not task.get("queued") or task.get("pending_job"):
-                    task["phase"] = "analyzing" if task["pending_job"] else "preparing"
-                    self.save(db, task, "Worker is analyzing results" if task["pending_job"] else "Worker is preparing code")
+                try:
+                    runtime.launch_training(workspace,job_id,adapter,number)
+                except OSError as exc:
+                    self.training_failure(db,task,job,attempt,"launch_failed",time.time(),exc.errno)
+                else:
+                    attempt.update(state="running",started_at=time.time())
+                    self.p.put(db,"job",job_id,job)
+        for _, key in sorted(ready):
             try:
-                runtime.run(key)
+                with self.p.tx() as db:
+                    task = self.p.get(db, "task", key)
+                    if task["status"] != "ready":
+                        continue
+                    research = task.get("research_mode") == "codex"
+                    if research and runtime.research_active(key):
+                        continue
+                    if not task.get("queued") or task.get("pending_job"):
+                        task["phase"] = "research_decision" if research else "analyzing" if task["pending_job"] else "preparing"
+                        self.save(db, task, "Worker is deciding from research history" if research else
+                                  "Worker is analyzing results" if task["pending_job"] else "Worker is preparing code")
+                if research:
+                    runtime.start_research(key)
+                else:
+                    runtime.run(key)
             except (OSError, subprocess.SubprocessError):
                 with self.p.tx() as db:
                     task = self.p.get(db, "task", key)
                     if task["status"] == "ready":
                         task.update(status="failed", phase="failed",failure_stage="worker",
-                                    failure="Worker 未能完成当前步骤。请检查执行环境后重试。")
+                                    failure="Worker 未能完成当前步骤。请检查执行环境后重试。",
+                                    failure_info={"log":f"decisions/{key}/worker.log"} if task.get("research_mode")=="codex" else {})
                         self.save(db, task, "Worker execution failed")
-
-
-class RuntimeAdapter:
-    def __init__(self, root):
-        self.root = root
-        self.training = {}
-
-    def launch_training(self, workspace, job_id, adapter, number):
-        self.training = {key:proc for key,proc in self.training.items() if proc.poll() is None}
-        directory = beans.attempt_dir(self.root,job_id,number)
-        directory.mkdir(parents=True,exist_ok=True)
-        with (directory/"worker.log").open("ab") as log:
-            self.training[job_id,number] = subprocess.Popen(
-                [sys.executable,str(BASE/"beans.py"),str(self.root),workspace,job_id,adapter,str(number)],
-                stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
-
-    def owns_training(self, job_id, number):
-        return (job_id,number) in self.training
-
-    def training_exit(self, job_id, number):
-        proc = self.training.get((job_id,number))
-        return proc.poll() if proc else None
-
-    def stop_training(self, job_id, number):
-        proc = self.training.get((job_id,number))
-        if proc and proc.poll() is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-
-    @staticmethod
-    def training_locked(directory):
-        path = directory/"lock"
-        if not path.exists():
-            return False
-        with path.open("rb") as lock:
-            try:
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-        return False
-
-    def run(self, key):
-        subprocess.run([sys.executable, str(BASE/"app.py"), "--state", str(self.root), "--worker", key],
-                       check=True, timeout=30)
 
 
 class ResearchWorker:
@@ -357,10 +250,56 @@ class ResearchWorker:
         return min(candidates, key=lambda x: abs(x-target))
 
     def run(self, key):
+        with self.p.tx(readonly=True) as db:
+            task = self.p.get(db, "task", key)
+        if not task or task["status"] != "ready":
+            return
+        completed = []
+        if task.get("research_mode") == "codex":
+            directory = self.p.root / "decisions" / key
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory/"lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return
+                with self.p.tx(readonly=True) as db:
+                    task = self.p.get(db, "task", key)
+                    if task["status"] != "ready":
+                        return
+                    context = planner.snapshot(self.p, db, task)
+                try:
+                    decision = planner.decide(self.p.root, context)
+                except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                    if isinstance(exc, subprocess.TimeoutExpired):
+                        reason = "Codex 在 120 秒内未返回研究决策"
+                    elif isinstance(exc, ValueError):
+                        reason = str(exc)[:240]
+                    else:
+                        reason = "无法启动 Codex 决策进程"
+                    print(reason, file=sys.stderr)
+                    with self.p.tx() as db:
+                        current = self.p.get(db, "task", key)
+                        if current["status"] == "ready" and current["round"] == context["round"]:
+                            current.update(status="failed", phase="failed", failure_stage="worker",
+                                           failure=reason, failure_info={"log":f"decisions/{key}/worker.log"})
+                            self.manager.save(db, current, "Codex research decision failed")
+                    return
+                self._run(key, completed, context, decision)
+        else:
+            self._run(key, completed)
+        for record, report_text in completed:
+            publish_result(self.p.root, record, report_text)
+
+    def _run(self, key, completed, context=None, decision=None):
         with self.p.tx() as db:
             task = self.p.get(db, "task", key)
             if not task or task["status"] != "ready":
                 return
+            if context is not None:
+                latest = planner.snapshot(self.p, db, task)
+                if any(context[k] != latest[k] for k in ("round","result","feedback","budget","constraints")):
+                    return
             if task.get("workspace"):
                 self.p.repo = self.p.root / "projects" / task["workspace"]
                 self.p.bootstrap()
@@ -407,18 +346,40 @@ class ResearchWorker:
                     "guardrail_floor":floor,
                 }
                 report = f"reports/{job['id']}.md"
-                decision = ("Promote for review" if accepted else
+                disposition = ("Promote for review" if accepted else
                             "Rejected by guardrail" if not passed else "Did not beat the current best")
-                self.p.write(report, f"# Round {task['round']}\n\n## Research objective\n{task['goal']}\n\n"
+                report_text = (f"# Round {task['round']}\n\n## Research objective\n{task['goal']}\n\n"
                              f"Configuration: {job.get('config',job['strength'])}\n\n## Analysis\n"
                              f"{primary}: {result[primary]:.6f} vs previous best {previous_best:.6f}.\n"
                              f"{guardrail}: {result[guardrail]:.6f} vs minimum {floor:.6f}.\n"
-                             f"Decision: {decision}.\n\n## Evidence\nRevision: {job['revision']}\nMetrics: {result}\n")
+                             f"Decision: {disposition}.\n\n## Evidence\nRevision: {job['revision']}\nMetrics: {result}\n")
+                if job.get("research_proposal") and ntl:
+                    hypothesis = job["research_proposal"]
+                    report_text += ("\n## Experiment decision\n"
+                                    f"- Hypothesis: {hypothesis['hypothesis']}\n"
+                                    f"- Goal alignment: {hypothesis['objective_alignment']}\n"
+                                    f"- Expected: {hypothesis['expected']}\n"
+                                    f"- Disconfirming result: {hypothesis['disconfirming_result']}\n"
+                                    f"- Evidence: {', '.join(hypothesis['history_refs']) or 'Initial hypothesis'}\n"
+                                    f"- Rationale: {hypothesis['rationale']}\n")
+                if job.get("diagnostics"):
+                    evidence = planner.evidence(job)
+                    report_text += "\n## Validation diagnostics\n" + json.dumps(
+                        {k:evidence[k] for k in ("recalls","sample_counts","largest_confusions","elapsed_seconds")},
+                        ensure_ascii=False, indent=2) + "\nFull confusion matrix: result.json.\n"
+                if decision is not None:
+                    report_text += "\n## Agent research analysis\n" + json.dumps(
+                        decision["analysis"], ensure_ascii=False, indent=2) + "\n"
+                self.p.write(report, report_text)
                 record = {**job, "task": key, "round": task["round"], "accepted": accepted,
                           "guardrail_passed": passed, "assessment":assessment,
                           "baseline_delta": round(result[primary]-reference, 6) if reference is not None else None,
                           "report": report, "report_commit": self.p.commit(f"Record {job['id']}", report)}
+                if decision is not None:
+                    record["research_analysis"] = decision["analysis"]
+                    record["research_evidence"] = [job["id"]]
                 self.p.put(db, "experiment", job["id"], record)
+                completed.append((record, report_text))
                 if accepted:
                     task["best"] = {**result, "strength": job["strength"], "revision": job["revision"]}
                     if real: task["best"].update(k=job["k"],scale=job["scale"])
@@ -427,8 +388,10 @@ class ResearchWorker:
                 self.manager.save(db, task, f"Analyzed {job['id']}: {'adopted' if accepted else 'rejected'}")
             if not task.get("continuous") and task["round"] >= task["max_experiments"]:
                 task.update(status="completed", phase="finished")
+                if decision and decision.get("summary"):
+                    task["research_summary"] = decision["summary"]
                 for item in feedback:
-                    item.update(consumed=True, disposition="预算已用完")
+                    item.update(consumed=True, disposition="已纳入本轮分析上下文" if decision is not None else "预算已用完")
                     self.p.put(db,"inbox",item["id"],item)
                 self.manager.save(db, task, "Experiment budget exhausted")
                 return
@@ -450,7 +413,13 @@ class ResearchWorker:
             task.pop("queued",None)
             tried = [e["strength"] for e in self.p.all(db, "experiment") if e["task"] == key]
             conservative = task.get("conservative", False) or "wide-search" not in task["settings"]["skills"]
-            if ntl:
+            if decision is not None:
+                if ntl:
+                    candidate = decision["proposal"]["config"]
+                    strength = 0
+                else:
+                    strength = decision["proposal"]["strength"]
+            elif ntl:
                 candidate=name_llm.propose(task["strategy"],task["round"]+1,task["best"])
                 strength=0
             elif bean:
@@ -467,7 +436,9 @@ class ResearchWorker:
                 message = item["message"]
                 match = re.search(r"(?:强度|strength)\s*[:：]?\s*(0(?:\.\d+)?|1(?:\.0+)?)(?![.\d])",message)
                 disposition = "已读取，模拟 Worker 未识别为实验指令"
-                if real or bean or ntl:
+                if decision is not None:
+                    disposition = "已纳入 Codex 研究决策上下文"
+                elif real or bean or ntl:
                     disposition = "已读取：当前使用已锁定的实验策略"
                 elif match:
                     value = float(match[1])
@@ -485,6 +456,7 @@ class ResearchWorker:
             task["round"] += 1
             jobid = f"{key}-{task['round']}"
             model_path = f"models/{jobid}."+("json" if bean or ntl or real else "py")
+            self.p.validate_candidate_path(model_path, task["constraints"])
             if bean or ntl:
                 self.p.write(model_path,candidate)
             elif real:
@@ -503,43 +475,22 @@ class ResearchWorker:
             if real:
                 data=json.loads((self.p.repo/"data/iris.json").read_text())
                 job.update(k=k,scale=scale,measured=iris.evaluate(data,k,scale))
+            if decision is not None:
+                job["research_proposal"] = decision["proposal"]
+                job["research_context_refs"] = [row["id"] for row in context["history"]]
+                job["research_feedback_refs"] = [row["id"] for row in context["feedback"]]
+            job["run_path"] = prepare(self.p.root, self.p.repo, task, job, model_path)
             self.p.put(db, "job", jobid, job)
             task.update(status="waiting", pending_job=jobid, phase="waiting",last_dispatched=time.time())
             self.manager.save(db, task, f"Submitted {jobid}; worker exits")
 
 
-class MainAgent:
-    def __init__(self, manager):
-        self.manager = manager
 
-    def reply(self, db, request):
-        message = request.get("message")
-        if not isinstance(message, str) or not message.strip() or len(message)>1000:
-            raise ValueError("Enter a message up to 1000 characters.")
-        action = request.get("action", "chat")
-        key = request.get("task")
-        if action == "delegate":
-            key = self.manager.create(db, message, request.get("budget", 3))
-            reply = f"已委派 {key}。Worker 会在预算内自主选择实验。"
-        elif action == "feedback":
-            self.manager.feedback(db, key, message.strip())
-            reply = f"已将反馈写入 {key} 的 Inbox。"
-        elif action == "chat":
-            tasks = self.manager.p.all(db, "task")
-            task = self.manager.p.get(db, "task", key) if key else (tasks[-1] if tasks else None)
-            reply = (f"{task['goal']}：{task['status']}，第 {task['round']}/{task['max_experiments']} 轮，"
-                     f"最佳低频 AUC {task['best']['low_freq_auc']}。可继续提交反馈。"
-                     if task else "当前项目使用固定的模拟 CTR 评测。可先确定目标和轮数，然后委派研究。")
-        else:
-            raise ValueError("Unknown action.")
-        for role, content in (("user", message), ("main", reply)):
-            self.manager.p.put(db, "chat", uuid.uuid4().hex, {"role": role, "message": content, "task": key})
-        return {"task": key, "reply": reply}
-
-
-def serve(project, port):
+def serve(project, port, chat_model=codex_chat):
+    recover_results(project)
     manager = TaskManager(project)
-    main = MainAgent(manager)
+    chat = MainChat(project, chat_model)
+    chat.recover_turns()
     workspace = WorkspaceAPI(project,manager)
     runtime = RuntimeAdapter(project.root)
 
@@ -583,11 +534,22 @@ def serve(project, port):
                 request = json.loads(self.rfile.read(size))
                 if not isinstance(request, dict):
                     raise ValueError("Expected an object.")
+                if self.path == "/v1/action" and request.get("op") == "message":
+                    if request.get("background") is True:
+                        return self.send(chat.background_turn(request, start=True), 202)
+                    return self.send(chat.reply(request))
+                if self.path == "/v1/action" and request.get("op") == "chat_status":
+                    return self.send(chat.background_turn(request))
+                if self.path == "/api/chat" and request.get("action", "chat") == "chat":
+                    return self.send(chat.reply(request, legacy=True))
+                if self.path in ("/api/chat", "/api/settings"):
+                    return self.send({"error": "此旧版写入接口已停用。请通过 /v1/action 提交工作区操作。"}, 410)
                 with project.tx() as db:
                     if self.path == "/v1/action":
                         request_key = request.pop("request_key",None)
+                        execute = (lambda db, request: chat.resolve_proposal(db, request, workspace.action)) if request.get("op") in ("confirm_supervisor", "cancel_supervisor") else workspace.action
                         if request_key is None:
-                            result = workspace.action(db,request)
+                            result = execute(db,request)
                         else:
                             if not isinstance(request_key,str) or not re.fullmatch(r"[a-zA-Z0-9_-]{16,100}",request_key):
                                 raise ValueError("Invalid request key.")
@@ -598,22 +560,13 @@ def serve(project, port):
                                     raise ValueError("Request key already used with different data.")
                                 result = previous["result"]
                             else:
-                                result = workspace.action(db,request)
+                                result = execute(db,request)
                                 project.put(db,"request",request_key,{"digest":digest,"result":result})
-                    elif self.path == "/api/chat":
-                        result = main.reply(db, request)
-                    elif self.path == "/api/settings":
-                        skills = request.get("skills")
-                        delay = request.get("delay")
-                        if (request.get("runtime") != "local-process" or not isinstance(skills, list)
-                                or "adaptive-ctr" not in skills or any(s not in ("adaptive-ctr", "wide-search") for s in skills)
-                                or type(delay) not in (int, float) or not .1 <= delay <= 60):
-                            raise ValueError("Invalid runtime, skills or training delay.")
-                        project.put(db, "settings", "active", request)
-                        result = request
                     else:
                         return self.send({"error": "Not found"}, 404)
                 self.send(result)
+            except ChatError as exc:
+                self.send({"error": str(exc)}, exc.status)
             except (ValueError, TypeError) as exc:
                 self.send({"error": str(exc)}, 400)
 
