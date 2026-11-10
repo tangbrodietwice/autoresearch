@@ -1,10 +1,10 @@
 """Workspace commands: plans."""
 from .common import uid
 from research.planner import SKILL as SCIENTIFIC_SKILL
-import beans
+from legacy.benchmarks import beans
 import copy
-import iris
-import name_llm
+from legacy.benchmarks import iris
+from legacy.benchmarks import name_llm
 from execution import PROVIDERS
 
 
@@ -55,6 +55,8 @@ def control(self, db, d):
             raise ValueError("请选择研究 Worker，研发主管负责讨论与分派。")
         if agent["runtime"] not in ("local-process", "codex"):
             raise ValueError("此 Provider 当前仅检测与配置，尚未接入研究执行。")
+        if env.get("adapter") == "local-project":
+            return start_local_project(self, db, d, plan, env, agent)
         research_mode=s("research_mode","rules")
         if research_mode not in ("rules","codex"):
             raise ValueError("未知研究决策模式。")
@@ -158,3 +160,20 @@ def control(self, db, d):
             raise ValueError("请使用计划控制按钮。")
         self.manager.feedback(db,task["id"],message)
     return self.put(db,"plan",plan)
+
+
+def start_local_project(api, db, request, plan, env, agent):
+    if agent["runtime"] != "codex" or not PROVIDERS["codex"].detect():
+        raise ValueError("请选择可用的 Codex Worker。")
+    goal = api.string(request, "design") or plan["direction"]
+    key = api.manager.create(db, goal, request.get("budget"))
+    task = api.get(db, "task", key)
+    primary = env["primary_metric"]
+    baseline = {primary: env["baseline_value"]}
+    task.update(research_mode="agent", workspace=env["id"], plan=plan["id"],
+                environment=copy.deepcopy(env), agent=copy.deepcopy(agent),
+                baseline=env["baseline"], baseline_metrics=baseline, best=dict(baseline),
+                constraints={"primary_metric": primary, "dataset": env["dataset"]})
+    api.manager.save(db, task, "Local project research contract approved")
+    plan["task"] = key
+    return api.put(db, "plan", plan)

@@ -25,7 +25,7 @@ def serve(stack,*args):
 with ExitStack() as stack:
     state=stack.enter_context(tempfile.TemporaryDirectory())
     backend=serve(stack,"tests/chat_fixture_server.py","--state",state,"--port","0")
-    web=serve(stack,"frontend/serve.py","--port","0","--backend-port",backend.rsplit(":",1)[1])
+    web=serve(stack,"apps/web/serve.py","--port","0","--backend-port",backend.rsplit(":",1)[1])
     def fetch(path,data=None):
         req=Request(web+path,data=json.dumps(data).encode() if data is not None else None,
                     headers={"Content-Type":"application/json"})

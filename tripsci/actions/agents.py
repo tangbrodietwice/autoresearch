@@ -1,6 +1,7 @@
 """Workspace commands: agents."""
 from .common import uid
 from execution import runtimes
+from run_workspace import write_text
 from main_chat import DEFAULT_PERMISSIONS
 from main_chat import SUPERVISOR_ID
 
@@ -29,8 +30,11 @@ def skill(self, db, d):
 
     row = dict(id=uid(), name=s("name", required=True), markdown=s("markdown", required=True))
     target = s("agent")
-    if target:
-        agent = self.get(db, "agent", target)
+    agent = self.get(db, "agent", target) if target else None
+    relative = f"skills/{row['id']}/SKILL.md"
+    write_text(self.p.root / relative, row["markdown"] + "\n")
+    row["path"] = relative
+    if agent:
         self.put(db, "skill", row)
         self.action(db, {"id":target, "op":"agent_skills", "skills":[*agent["skills"], row["id"]]})
         return row
@@ -60,11 +64,11 @@ def agent(self, db, d):
     old = self.p.get(db,"agent",key)
     if s("id") and not old:
         raise ValueError("找不到要编辑的智能体。")
-    skills = d.get("skills",["adaptive-ctr"])
-    catalog={x["id"]:x for x in self.p.all(db,"skill")}
-    if not isinstance(skills,list) or "adaptive-ctr" not in skills or any(not isinstance(x,str) or x not in ("adaptive-ctr","wide-search") and x not in catalog for x in skills):
-        raise ValueError("请选择支持的研究 Skill。")
     runtime=s("runtime","local-process")
+    skills = d.get("skills", ["adaptive-ctr"] if runtime == "local-process" else [])
+    catalog={x["id"]:x for x in self.p.all(db,"skill")}
+    if not isinstance(skills,list) or (runtime == "local-process" and "adaptive-ctr" not in skills) or any(not isinstance(x,str) or x not in ("adaptive-ctr","wide-search") and x not in catalog for x in skills):
+        raise ValueError("请选择支持的研究 Skill。")
     if not any(x["id"]==runtime and x["installed"] for x in runtimes()):
         raise ValueError("请选择已检测到的运行时。")
     name, instructions = s("name",required=True), s("instructions")

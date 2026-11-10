@@ -11,7 +11,7 @@ from tempfile import NamedTemporaryFile
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "tripsci"))
 from native_api import DEFAULT_AGENT
 
 

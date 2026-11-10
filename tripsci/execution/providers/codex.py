@@ -96,21 +96,24 @@ def run_active_codex(command, prompt, directory, progress):
             return subprocess.CompletedProcess(command, process.returncode, stderr=stderr.read().decode(errors="replace"))
 
 
-def run_json(executable, prompt, schema, *, web_search="disabled", timeout=90, progress=None):
+def run_json(executable, prompt, schema, *, web_search="disabled", timeout=90, progress=None, workspace=None):
     with TemporaryDirectory(prefix="tripsci-agent-") as directory:
         output = Path(directory) / "output.json"
         schema_path = Path(directory) / "schema.json"
         schema_path.write_text(json.dumps(schema), encoding="utf-8")
-        command = [executable, "exec", "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
-                   "--skip-git-repo-check", "--ephemeral", "--disable", "shell_tool",
-                   "-c", f'web_search="{web_search}"', "--cd", directory,
+        cwd = str(workspace) if workspace is not None else directory
+        sandbox = "workspace-write" if workspace is not None else "read-only"
+        command = [executable, "exec", "--sandbox", sandbox, "--ignore-user-config", "--ignore-rules",
+                   "--skip-git-repo-check", "--ephemeral",
+                   *([] if workspace is not None else ["--disable", "shell_tool"]),
+                   "-c", f'web_search="{web_search}"', "--cd", cwd,
                    "--output-schema", str(schema_path), "--output-last-message", str(output)]
         try:
             if progress is not None:
-                process = run_active_codex([*command, "--json", "-"], prompt, directory, progress)
+                process = run_active_codex([*command, "--json", "-"], prompt, cwd, progress)
             else:
                 process = subprocess.run([*command, "-"], input=prompt, capture_output=True, text=True,
-                                         cwd=directory, timeout=timeout, env=codex_environment())
+                                         cwd=cwd, timeout=timeout, env=codex_environment())
         except subprocess.TimeoutExpired as exc:
             raise ProviderError("本轮达到执行时间上限。你可以重试或编辑原消息。", 504) from exc
         except OSError as exc:

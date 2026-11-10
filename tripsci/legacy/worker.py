@@ -1,15 +1,15 @@
-"""Research worker orchestration and experiment records."""
+"""Worker for legacy sample and benchmark plans."""
 from mock_training import MockTraining
 from research import planner
 from run_workspace import prepare
 from run_workspace import publish_result
 from scheduler import TaskManager
-import beans
+from legacy.benchmarks import beans
 from pathlib import Path
 import fcntl
-import iris
+from legacy.benchmarks import iris
 import json
-import name_llm
+from legacy.benchmarks import name_llm
 import re
 import subprocess
 import sys
@@ -101,7 +101,7 @@ class ResearchWorker:
                 target = self.p.repo/"data/dry-bean.csv.gz"
                 target.parent.mkdir(exist_ok=True)
                 temp=target.with_suffix(".tmp")
-                temp.write_bytes((BASE/"datasets/dry-bean.csv.gz").read_bytes())
+                temp.write_bytes((BASE/"benchmarks/datasets/dry-bean.csv.gz").read_bytes())
                 temp.replace(target)
                 self.p.write("evaluation/beans-protocol.json",{"sha256":beans.dataset()["sha256"],"seed":602,
                              "baseline":beans.BASELINE,"split":["train","validation","test"]})

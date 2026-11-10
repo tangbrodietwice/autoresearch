@@ -4,9 +4,10 @@ from .common import MODES
 from .common import uid
 from pathlib import Path
 from urllib.parse import urlparse
-import beans
-import iris
-import name_llm
+from research.project_runner import project_config
+from legacy.benchmarks import beans
+from legacy.benchmarks import iris
+from legacy.benchmarks import name_llm
 import re
 
 
@@ -88,13 +89,19 @@ def workspace(self, db, d):
     if mode not in MODES:
         raise ValueError("请选择执行模式。")
     config = {key:s(key,required=True) for key in (*COMMON,*MODES[mode])}
-    floor = d.get("floor")
-    if type(floor) not in (float,int) or not 0 <= floor <= 1:
-        raise ValueError("AUC 护栏必须介于 0 和 1。")
-    config.update(mode=mode,floor=floor,adapter="mock")
-    if op=="check":
-        return {"message":"模拟配置通过。未连接服务器，也未验证实际仓库、命令或数据。"}
+    if d.get("kind") == "local-project":
+        config = project_config(dict(config, mode=mode), d)
+        if op == "check":
+            return {"message": "已验证本机仓库、数据和配置格式；尚未执行训练或评测。"}
+    else:
+        floor = d.get("floor")
+        if type(floor) not in (float,int) or not 0 <= floor <= 1:
+            raise ValueError("AUC 护栏必须介于 0 和 1。")
+        config.update(mode=mode,floor=floor,adapter="mock")
+        if op == "check":
+            return {"message":"模拟配置通过。未连接服务器，也未验证实际仓库、命令或数据。"}
     key = s("id") or uid()
+
     old = self.p.get(db,"workspace",key)
     if s("id") and (not old or old.get("archived")): raise ValueError("找不到要编辑的项目。")
     if old and old.get("adapter") in ("iris","beans","name-llm"): raise ValueError("公开数据集项目使用固定数据与评测协议。")
@@ -129,10 +136,17 @@ def integration(self, db, d):
     prior = [r for r in self.p.all(db, "integration") if r["workspace"] == env["id"]]
     if any(r["revision"] == revision for r in prior):
         raise ValueError("这个项目提交已经记录。")
-    keys = ("balanced_accuracy", "accuracy") if env.get("adapter")=="name-llm" else ("macro_f1", "accuracy") if env.get("adapter") in ("iris","beans","name-llm") else ("low_freq_auc", "overall_auc")
+    if env.get("adapter") == "local-project":
+        keys = (env["primary_metric"],)
+    else:
+        keys = ("balanced_accuracy", "accuracy") if env.get("adapter")=="name-llm" else ("macro_f1", "accuracy") if env.get("adapter") in ("iris","beans","name-llm") else ("low_freq_auc", "overall_auc")
     metrics = d.get("metrics", {})
-    if not isinstance(metrics, dict) or any(type(metrics.get(k)) not in (int, float) or not 0 <= metrics[k] <= 1 for k in keys):
-        raise ValueError("请提供 0 到 1 之间的完整项目评测指标。")
+    import math
+    if not isinstance(metrics, dict) or any(
+        type(metrics.get(k)) not in (int, float) or not math.isfinite(metrics[k])
+        or (env.get("adapter") != "local-project" and not 0 <= metrics[k] <= 1) for k in keys
+    ):
+        raise ValueError("请填写符合项目定义的完整评测指标。")
     return self.put(db, "integration", dict(id=uid(), workspace=env["id"], revision=revision,
                     dataset=env["dataset"], evaluate=env["evaluate"], adapter=env["adapter"],
                     ordinal=max((r["ordinal"] for r in prior), default=0)+1, plans=sources,

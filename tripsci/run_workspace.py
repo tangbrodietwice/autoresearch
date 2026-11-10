@@ -82,6 +82,8 @@ def recover_results(project):
         tasks = {row["id"]: row for row in project.all(db, "task")}
     for record in records:
         directory = run_dir(project.root, record["id"])
+        if record.get("adapter") == "local-project":
+            continue  # This runner publishes its files before committing the experiment row.
         if not record.get("run_path") or (directory / "result.json").is_file():
             continue
         task = tasks[record["task"]]

@@ -62,3 +62,19 @@ Chromium 通过：无项目引导、从项目列表进入看板、从项目创�
   Python import checks. This does not verify an interactive native window.
 - Live Codex research on the existing Name That LLM project, second-provider
   execution and live workspace migration are pending.
+
+## Configured local ML project and source layout
+
+- `scripts/check.sh` includes a previously unseen regression repository:
+  two Worker proposals use fixture model responses, while training and
+  evaluation commands run for real. RMSE is 10 at baseline, 7 and 4 in the
+  two rounds. The workspace reopens between rounds; the second proposal sees
+  the first result. The original Git checkout stays unchanged; evaluation uses
+  the approved revision even when the candidate edits its copy of the scorer.
+- Chrome verifies configuration checks, saving the general-purpose project,
+  and a project chart labeled RMSE. Existing browser workflow, Web/Iris smoke,
+  synthetic Name That LLM and real Dry Bean concurrency also passed.
+- macOS bundle build, signature and packaged service/resource loading passed.
+- A standalone live Codex probe edited a disposable candidate file. A full live
+  two-round run was not executed: the host approval gate rejected executing
+  unreviewed model-generated code with host-user permissions.

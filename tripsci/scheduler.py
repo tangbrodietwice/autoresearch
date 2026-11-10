@@ -183,7 +183,7 @@ class TaskManager:
                     task = self.p.get(db, "task", key)
                     if task["status"] != "ready":
                         continue
-                    research = task.get("research_mode") == "codex"
+                    research = task.get("research_mode") in ("agent", "codex")
                     if research and runtime.research_active(key):
                         continue
                     if not task.get("queued") or task.get("pending_job"):
@@ -200,5 +200,5 @@ class TaskManager:
                     if task["status"] == "ready":
                         task.update(status="failed", phase="failed",failure_stage="worker",
                                     failure="Worker 未能完成当前步骤。请检查执行环境后重试。",
-                                    failure_info={"log":f"decisions/{key}/worker.log"} if task.get("research_mode")=="codex" else {})
+                                    failure_info={"log":f"decisions/{key}/worker.log"} if task.get("research_mode") in ("agent", "codex") else {})
                         self.save(db, task, "Worker execution failed")

@@ -1,6 +1,6 @@
 const { chromium }=require('playwright');
-const {spawn}=require('node:child_process');
-const {mkdtempSync,rmSync}=require('node:fs');
+const {spawn,execFileSync}=require('node:child_process');
+const {mkdtempSync,mkdirSync,rmSync,writeFileSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const assert=require('node:assert/strict');
@@ -14,7 +14,7 @@ function server(args){
  let browser, page;
  try{
   const api=await server(['tests/chat_fixture_server.py','--state',temp,'--port','0']);
-  const web=await server(['frontend/serve.py','--port','0','--backend-port',new URL(api).port]);
+  const web=await server(['apps/web/serve.py','--port','0','--backend-port',new URL(api).port]);
   browser=await chromium.launch(process.env.TRIPSCI_CHROMIUM ? {executablePath:process.env.TRIPSCI_CHROMIUM}:{});
   page=await browser.newPage();
   const errors=[];
@@ -59,11 +59,30 @@ function server(args){
   await audit();
   assert.equal(await page.locator('#main').getByRole('button',{name:/Iris|Dry Bean|示例/}).count(),0);
   await page.locator('#main').getByRole('button',{name:/新建项目/}).click();
-  for(const [label,value] of Object.entries({'代码地址':'fixture/ctr','默认基线':'v1','数据版本':'synthetic-v1','训练入口':'train.py','评测入口':'evaluate.py'})){
-    await page.getByLabel(label,{exact:true}).fill(value);
+  const regression=join(temp,'regression-source');
+  mkdirSync(regression);
+  writeFileSync(join(regression,'data.txt'),'10');
+  writeFileSync(join(regression,'train.py'),'pass');
+  writeFileSync(join(regression,'score.py'),'pass');
+  const git=(...args)=>execFileSync('git',['-C',regression,...args]);
+  git('init','-q');
+  git('add','.');
+  git('-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','-qm','fixture');
+  for(const [name,value] of Object.entries({'项目名称':'通用回归项目','本机 Git 仓库目录':regression,
+    '数据文件路径':'data.txt','基线名称':'baseline','训练命令':'python3 train.py','评测命令':'python3 score.py',
+    '主指标':'rmse','基线分数':'10'})){
+    await page.getByLabel(name,{exact:true}).fill(value);
   }
-  await page.getByLabel('项目名称').fill('UI 测试项目');
+  await page.getByRole('button',{name:'检查配置',exact:true}).click();
+  await page.getByText('已验证本机仓库、数据和配置格式；尚未执行训练或评测。').waitFor();
   await page.getByRole('button',{name:'保存项目'}).click();
+  await page.getByRole('img',{name:'项目 rmse 趋势，暂无合并评测',exact:true}).waitFor();
+  await page.getByRole('button',{name:'删除项目',exact:true}).click();
+  await page.getByRole('button',{name:'确认删除',exact:true}).click();
+  const mockProject=await page.request.post(web+'/v1/action',{data:{op:'workspace',name:'UI 测试项目',
+    repo:'fixture/ctr',baseline:'v1',dataset:'synthetic-v1',train:'train.py',evaluate:'evaluate.py',mode:'local',floor:.715}});
+  assert.ok(mockProject.ok());
+  await page.locator('.project-row').filter({hasText:'UI 测试项目'}).click();
   await page.locator('summary[aria-label="切换项目"]').filter({hasText:'UI 测试项目'}).waitFor();
   await page.getByRole('button',{name:'新聊天',exact:true}).click();
   let releaseFirstTurn;

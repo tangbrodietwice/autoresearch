@@ -53,7 +53,7 @@ Web 默认状态保存在 `.state/web`。可用 `--state` 指定其他状态目�
 
 ### 单轮运行目录
 
-`backend/app.py` 负责 HTTP 和调度，`backend/storage.py` 管理 SQLite 与 Git 工件，`backend/runtime.py` 启动本机 Worker 和训练进程。`backend/run_workspace.py` 管理可复查的运行目录。
+`tripsci/app.py` 负责 HTTP 和调度，`tripsci/storage.py` 管理 SQLite 与 Git 工件，`tripsci/runtime.py` 启动本机 Worker 和训练进程。`tripsci/run_workspace.py` 管理可复查的运行目录。
 
 新提交的实验会在状态目录下生成 `runs/<job-id>/`，包含运行清单、候选代码或参数、评测协议、完成后的报告和结果。有关联智能体时还会记录启动时的 `AGENTS.md` 和已绑定的自定义 `skills/<id>/SKILL.md`。本机独立训练进程的回执和日志按尝试号存放于 `attempts/`。旧实验仍可通过原有 Git 工作区查看。
 
@@ -67,4 +67,17 @@ Codex 决策在独立进程运行，训练等待时不调用模型。每轮保�
 
 ### TripSci 研发主管
 
-工作区聊天和研究计划对话由本机已登录的 Codex CLI 执行。主管的角色指令在 `backend/agents/supervisor/AGENTS.md`。对话历史及相关项目和实验摘要会传入模型。主管可以提出项目配置、研究计划、委派、反馈及 Skill 等变更，页面展示操作内容，经确认后由服务端校验并执行。模型超时或启动失败时，界面显示错误并保留输入供重试。
+工作区聊天和研究计划对话由本机已登录的 Codex CLI 执行。主管的角色指令在 `tripsci/agents/supervisor/AGENTS.md`。对话历史及相关项目和实验摘要会传入模型。主管可以提出项目配置、研究计划、委派、反馈及 Skill 等变更，页面展示操作内容，经确认后由服务端校验并执行。模型超时或启动失败时，界面显示错误并保留输入供重试。
+
+## 通用本机研究项目
+
+Web 工作台默认创建通用项目。先准备一个本机 Git 仓库并提交基线，填写数据文件、训练命令、评测命令、主指标、优化方向、基线分数和随机种子。然后在智能体页面配置一个 Codex Worker，创建研究计划并确认预算。
+
+- 训练命令从候选 Git 副本运行；评测命令从计划锁定的基线 Git 副本运行。
+- 两个命令接收 `TRIPSCI_DATASET`、`TRIPSCI_SEED`、`TRIPSCI_RUN_DIR` 和 `TRIPSCI_CANDIDATE_DIR`。用运行目录传递模型或预测文件。
+- 评测命令把指标写到 `TRIPSCI_METRICS_PATH`，格式是 JSON 对象，例如 `{"rmse": 4.2}`。指标可以超出 0–1。请确保项目命令实际使用随机种子，并将依赖和切分协议纳入项目版本管理。
+- Worker 在独立副本内决定并实现代码改动，TripSci 运行配置的命令并保存输入指纹、日志、指标和分析。评测代码从固定版本读取；普通本机训练命令不是安全隔离环境，仅用于信任的项目。
+- 暂停阻止开始下一轮；当前已经启动的命令可以结束。旧 benchmark 仍可通过兼容路径读取和运行。本轮未启用真实远程训练。
+
+源码入口：`apps/web/`、`apps/macos/`、`tripsci/`；旧任务资源在
+`tripsci/legacy/benchmarks/`。工作区数据路径保持原样。

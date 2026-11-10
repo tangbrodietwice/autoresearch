@@ -28,7 +28,7 @@ struct APIError: LocalizedError { let message: String; var errorDescription: Str
         do {
             if let url = ProcessInfo.processInfo.environment["TRIPSCI_URL"] { base = URL(string:url) }
             else {
-                guard let script = Bundle.main.url(forResource:"app",withExtension:"py",subdirectory:"backend") else { throw APIError(message:"找不到应用内的研究服务。") }
+                guard let script = Bundle.main.url(forResource:"app",withExtension:"py",subdirectory:"tripsci") else { throw APIError(message:"找不到应用内的研究服务。") }
                 let fm = FileManager.default
                 let root = ProcessInfo.processInfo.environment["TRIPSCI_STATE"].map { URL(fileURLWithPath:$0) }
                     ?? fm.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("TripSci")

@@ -6,13 +6,13 @@ live projects or a change to fixed evaluation protocols.
 
 | Area | Entry point | Owns |
 | --- | --- | --- |
-| Launch | `backend/app.py` | HTTP and worker CLI compatibility |
-| Transport | `backend/server.py` | Request decoding, idempotency and HTTP responses |
-| Workspace operations | `backend/native_api.py`, `backend/actions/` | Shared UI and confirmed agent commands |
-| Conversations | `backend/main_chat.py` | Supervisor prompt, replies and proposals |
-| Research | `backend/scheduler.py`, `backend/worker.py`, `backend/research/planner.py` | Deterministic scheduling, experiment lifecycle and evidence-based decisions |
-| Execution | `backend/execution/`, `backend/runtime.py`, `backend/mock_training.py` | CLI adapter discovery and invocation; worker/training processes |
-| Storage | `backend/storage.py`, `backend/run_workspace.py` | SQLite, Git and file snapshots |
+| Launch | `tripsci/app.py` | HTTP and worker CLI compatibility |
+| Transport | `tripsci/server.py` | Request decoding, idempotency and HTTP responses |
+| Workspace operations | `tripsci/native_api.py`, `tripsci/actions/` | Shared UI and confirmed agent commands |
+| Conversations | `tripsci/main_chat.py` | Supervisor prompt, replies and proposals |
+| Research | `tripsci/scheduler.py`, `tripsci/worker.py`, `tripsci/research/planner.py` | Deterministic scheduling, experiment lifecycle and evidence-based decisions |
+| Execution | `tripsci/execution/`, `tripsci/runtime.py`, `tripsci/mock_training.py` | CLI adapter discovery and invocation; worker/training processes |
+| Storage | `tripsci/storage.py`, `tripsci/run_workspace.py` | SQLite, Git and file snapshots |
 
 `execution.run_json` is the shared CLI entry point. The supervisor supplies a
 conversation schema and can enable web search through its existing permissions.
@@ -35,3 +35,21 @@ flows. Claude Code and Pi discovery does not imply execution support.
 3. Rehearse storage and source-directory migrations using copies of existing
    state. Validate two parallel live research plans with interruption and
    recovery before switching the main workspace.
+
+## Configured local research
+
+The Web client defaults to a project contract with a local Git root, tracked
+source revision, data-file fingerprint, training/evaluation argv, baseline score,
+metric direction and seed. No benchmark catalogue is consulted on this path.
+`research/project_runner.py` validates and executes that contract; `research/local_worker.py`
+gives Codex the objective, feedback and past evidence, and records each proposal
+and result. The candidate and evaluator are checked out separately. The evaluator
+is pinned to the approved source revision and consumes artifacts from the run
+directory. The original repository is not edited.
+
+Round artifacts are written under `runs/<task>-<round>/`; SQLite indexes completed
+experiments and progress. A restart can resume a saved proposal and reuse saved
+metrics after a failed or interrupted analysis. Existing benchmark behavior is
+preserved under the legacy Worker and benchmark modules; its dedicated commands
+and compatibility views are not the generic execution contract. Codex remains
+the only connected model provider. No separate AgentRun is introduced.

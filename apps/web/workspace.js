@@ -267,7 +267,7 @@ function chat(){
 }
 function planRow(p){return '<button type="button" class="listrow" data-act="plan" data-key="'+E(p.id)+'"><span class="mono">'+E(p.id.slice(0,7))+'</span><strong>'+E(p.title)+'</strong><small class="projectCol">'+E(get('workspace',p.workspace)?.name||'未关联项目')+'</small>'+label(state(p))+'</button>'}
 function metrics(r){return Object.entries(r||{}).map(([k,v])=>E(metricNames[k]||k)+' '+E(v)).join(' · ')}
-const configLabel=e=>e.adapter==='name-llm'&&e.config?(e.config.classifier==='multinomial_nb'?'多项式朴素贝叶斯':'余弦质心')+' · 词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
+const configLabel=e=>e.adapter==='local-project'?(e.research_proposal?.hypothesis||'项目候选代码'):e.adapter==='name-llm'&&e.config?(e.config.classifier==='multinomial_nb'?'多项式朴素贝叶斯':'余弦质心')+' · 词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
 const shortScore=(e,k)=>Number.isFinite(e.result?.[k])?(metricNames[k]||k)+' '+e.result[k].toFixed(4):'暂无指标';
 const delta=e=>Number.isFinite(e.baseline_delta)?' · 较基线 '+(e.baseline_delta>=0?'+':'')+e.baseline_delta.toFixed(4):'';
 const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',research_decision:'Codex 正在检索历史并作出研究决策',finished:'实验已结束'};
@@ -302,6 +302,10 @@ function analyzeRun(e,t){
  return {what:configLabel(e),objective:info.objective||t?.goal,conclusion,expectation};
 }
 function runAnalysis(e,t,compact=false){
+ if(e.adapter==='local-project'){
+   const p=e.research_proposal||{}, a=e.research_analysis||{};
+   return '<div class="run-analysis">'+[['假设',p.hypothesis],['预期',p.expected],['选择依据',p.rationale],['结论',a.conclusion],['是否符合预期',a.expectation],['下一步',a.next_step]].filter(([,v])=>v).map(([k,v])=>'<p><strong>'+E(k)+'</strong> '+E(v)+'</p>').join('')+'</div>';
+ }
  const a=analyzeRun(e,t);
  const proposal=e.research_proposal, analysis=e.research_analysis;
  return '<div class="run-analysis">'+(proposal?'<p><strong>假设</strong> '+E(proposal.hypothesis)+'</p>'+(proposal.objective_alignment?'<p><strong>与目标的关系</strong> '+E(proposal.objective_alignment)+'</p>':'')+'<p><strong>预期与反证</strong> '+E(proposal.expected)+' · '+E(proposal.disconfirming_result)+'</p><p><strong>选择依据</strong> '+E(proposal.rationale)+(proposal.history_refs.length?' · '+E(proposal.history_refs.join('、')):'')+'</p>':'')+
@@ -356,6 +360,9 @@ function reportText(r){
  const summaries=r.runs.flatMap(e=>{
    const a=analyzeRun(e,{goal:r.goal,constraints:{primary_metric:r.primary}});
    const p=e.research_proposal, v=e.research_analysis;
+   if(e.adapter==='local-project')return ['','### 第 '+e.round+' 轮','- 假设：'+p.hypothesis,
+     '- 预期：'+p.expected,'- 结论：'+v.conclusion,'- 是否符合预期：'+v.expectation,
+     '- 下一步：'+v.next_step,'- 指标：'+JSON.stringify(e.result),'- 复现：'+e.revision+' · '+e.run_path];
    return ['','### 第 '+e.round+' 轮',a.what+'。'+a.conclusion,
      ...(p?['- 假设：'+p.hypothesis,'- 目标关系：'+(p.objective_alignment||r.goal),'- 预期：'+p.expected,'- 反证：'+p.disconfirming_result,
             '- 选择依据：'+p.rationale+'（'+(p.history_refs.join('、')||'初始假设')+'）']:[]),
@@ -376,7 +383,7 @@ function reportCard(p){
      change<0?'验证集上的提升未在保留测试集复现。':'候选在保留测试集上与基线持平。';
  }
  return '<article class="research-report" aria-label="实验报告"><div class="flex spread"><h2>实验报告</h2></div>'+
- '<p>完成 '+r.runs.length+' / '+r.budget+' 轮 · '+bad+' 轮未通过护栏</p><p>基线：'+E(r.baseline)+(Number.isFinite(r.baseline_value)?' · '+E(metricNames[r.primary]+' '+r.baseline_value.toFixed(4)):'')+'</p>'+
+ '<p>完成 '+r.runs.length+' / '+r.budget+' 轮 · '+bad+' 轮未通过护栏</p><p>基线：'+E(r.baseline)+(Number.isFinite(r.baseline_value)?' · '+E((metricNames[r.primary]||r.primary)+' '+r.baseline_value.toFixed(4)):'')+'</p>'+
  '<p><strong>'+E(r.candidate?'最佳候选：第 '+r.candidate.round+' 轮 · '+shortScore(r.candidate,r.primary)+delta(r.candidate):'没有超过基线且通过护栏的候选。')+'</strong></p>'+
  (r.research_summary?'<section><h3>研究结论</h3><p>'+E(r.research_summary.findings)+'</p><h3>局限</h3><p>'+E(r.research_summary.limitations)+'</p><h3>后续验证</h3><p>'+E(r.research_summary.next_steps)+'</p></section>':'')+
  '<details><summary>逐轮结果与复现信息</summary>'+r.runs.map(e=>experiment(e,task(p))).join('')+'</details>'+
@@ -405,7 +412,7 @@ function plans(){
  transcript(p.messages)+researchActivity(p)+turnPreview(chatTurns.get(page+id))+'</div></div>'+composer('回复这项研究…','Enter 发送 · Shift + Enter 换行')+
  '</div><aside id="plan-status" class="rail" aria-label="研究计划状态">'+rail(p)+'</aside></div>';
 }
-function outcome(e){return e.guardrail_passed===false?'未通过护栏':e.accepted?'通过护栏 · 有改进':'通过护栏 · 未改进'}
+function outcome(e){if(e.adapter==='local-project')return e.accepted?'有改进':'未改进';return e.guardrail_passed===false?'未通过护栏':e.accepted?'通过护栏 · 有改进':'通过护栏 · 未改进'}
 function experimentSummary(e,p){
  const t=task(p);
  return '<article class="result-row"><div class="flex spread"><strong>'+E(p.title)+' · 第 '+E(e.round)+' 轮</strong>'+label(outcome(e))+'</div>'+runAnalysis(e,t)+
@@ -425,21 +432,22 @@ function experimentLibrary(){
  empty('暂无匹配实验','已完成的实验会在这里汇总。'))+
  (matching.length>experimentLimit?btn('显示更多实验','moreExperiments'):''));
 }
-const projectMetrics=p=>p.adapter==='name-llm'?['balanced_accuracy','accuracy']:p.adapter!=='mock'?['macro_f1','accuracy']:['low_freq_auc','overall_auc'];
+const projectMetrics=p=>p.primary_metric?[p.primary_metric]:p.adapter==='name-llm'?['balanced_accuracy','accuracy']:p.adapter!=='mock'?['macro_f1','accuracy']:['low_freq_auc','overall_auc'];
 function trend(p){
- const opts=projectMetrics(p), metric=chartChoices[p.id]||opts[0];
+ const opts=projectMetrics(p), metric=opts.includes(chartChoices[p.id])?chartChoices[p.id]:opts[0];
  const history=all('integration').filter(r=>r.workspace===p.id).sort((a,b)=>a.ordinal-b.ordinal);
  const protocol=history.filter(r=>r.dataset===p.dataset&&r.evaluate===p.evaluate&&r.adapter===p.adapter);
  const points=protocol.filter(r=>Number.isFinite(r.metrics[metric]));
  const scores=points.map(r=>r.metrics[metric]);
  const maxRound=Math.max(4,points.length);
- const min=scores.length?Math.max(0,Math.floor((Math.min(...scores)-.005)*100)/100):0;
- const max=scores.length?Math.min(1,Math.ceil((Math.max(...scores)+.005)*100)/100):1;
+ const low=scores.length?Math.min(...scores):0, high=scores.length?Math.max(...scores):1;
+ const pad=Math.max((high-low)*.08,Math.abs(high)*.005,.005);
+ const min=scores.length?low-pad:0, max=scores.length?high+pad:1;
  const x=i=>62+i*650/(maxRound-1), y=v=>169-(v-min)/(max-min)*145;
  const grid=Array.from({length:5},(_,i)=>{const value=min+(max-min)*i/4, yy=y(value);return '<line x1="62" x2="712" y1="'+yy+'" y2="'+yy+'"/><text x="52" y="'+(yy+4)+'" text-anchor="end">'+value.toFixed(scores.length?3:2)+'</text>'}).join('');
  const ticks=Array.from({length:maxRound},(_,i)=>maxRound>9&&i!==maxRound-1&&i%Math.ceil(maxRound/8)!==0?'':'<text x="'+x(i)+'" y="194" text-anchor="middle">'+(points[i]?'v'+points[i].ordinal:scores.length?'':'v'+(i+1))+'</text>').join('');
  const line=scores.length?'<polyline fill="none" stroke="#ab563c" stroke-width="2.5" points="'+scores.map((v,i)=>x(i)+','+y(v)).join(' ')+'"/>'+points.map((r,i)=>'<circle cx="'+x(i)+'" cy="'+y(r.metrics[metric])+'" r="4" fill="#ab563c"><title>v'+r.ordinal+' · '+E(r.revision.slice(0,8))+' · '+r.metrics[metric].toFixed(4)+'</title></circle>').join(''):'';
- return card('<div class="flex spread"><div><h3>项目指标趋势</h3><small>仅展示成果合并后的项目评测 · '+E(p.dataset)+'</small></div><div class="flex">'+pick('趋势指标',opts.map(k=>[k,metricNames[k]]),metric)+btn('记录合并评测','recordIntegration')+'</div></div><div class="chart"><svg viewBox="0 0 738 206" role="img" aria-label="'+E('项目 '+metricNames[metric]+' 趋势'+(!scores.length?'，暂无合并评测':''))+'">'+grid+ticks+line+'</svg>'+(!scores.length?'<span class="chart-empty">暂无合并后的评测</span>':'')+'</div>'+
+ return card('<div class="flex spread"><div><h3>项目指标趋势</h3><small>仅展示成果合并后的项目评测 · '+E(p.dataset)+'</small></div><div class="flex">'+pick('趋势指标',opts.map(k=>[k,(metricNames[k]||k)]),metric)+btn('记录合并评测','recordIntegration')+'</div></div><div class="chart"><svg viewBox="0 0 738 206" role="img" aria-label="'+E('项目 '+(metricNames[metric]||metric)+' 趋势'+(!scores.length?'，暂无合并评测':''))+'">'+grid+ticks+line+'</svg>'+(!scores.length?'<span class="chart-empty">暂无合并后的评测</span>':'')+'</div>'+
  (history.length!==protocol.length?'<p class="muted">较早的评测协议与当前配置不同，记录保留在下方，不参与本图比较。</p>':'')+
  (history.length?'<details><summary>合并评测记录（'+history.length+'）</summary>'+history.slice().reverse().map(r=>'<article class="result-row"><strong>v'+r.ordinal+' · '+E(r.revision.slice(0,8))+'</strong><p>'+E(r.summary)+'</p><p>'+metrics(r.metrics)+'</p><small>成果来源：'+E(r.plans.map(q=>q.title).join('、'))+' · '+E(r.dataset)+'</small></article>').join('')+'</details>':'<small>研究计划的候选成绩会显示在近期实验中，不会改变项目曲线。</small>'));
 }
@@ -448,7 +456,7 @@ function integrationForm(){
  if(!sources.length)return modal('记录合并评测','noIntegration','<p>此项目还没有已保留的候选。先在研究计划中完成评审，再合并成果并用项目的固定评测配置重新评估。</p>','知道了');
  return modal('记录合并评测','integration','<p>录入已经合并和重新评测的项目版本。此操作记录结果，不执行 Git 合并或训练。</p>'+
  '<fieldset><legend>纳入此版本的研究计划</legend>'+sources.map(q=>'<label><input name="sourcePlan" type="checkbox" value="'+E(q.id)+'"> '+E(q.title)+'</label>').join('')+'</fieldset>'+
- input('revision','合并后的 Git 提交哈希')+projectMetrics(p).map(k=>input(k,metricNames[k],undefined,'number')).join('')+
+ input('revision','合并后的 Git 提交哈希')+projectMetrics(p).map(k=>input(k,metricNames[k]||k,undefined,'number')).join('')+
  area('summary','变更与评测摘要'),'保存评测');
 }
 function projectSidebar(p, plans){
@@ -459,7 +467,7 @@ function projectSidebar(p, plans){
  const active=plans.filter(plan=>state(plan)==='进行中').length;
  const remoteFields=(modes[p.mode]||[]).map(([key,name])=>field(name,p[key])).join('');
  return '<aside class="rail project-sidebar" aria-label="项目状态与配置"><section><h2>项目状态</h2>'+
-   kv('评测环境',imported?'本机真实评测':'模拟评测')+kv('进行中的研究计划',active)+'</section>'+
+   kv('评测环境',p.adapter!=='mock'?'本机真实评测':'模拟评测')+kv('进行中的研究计划',active)+'</section>'+
    '<section><div class="flex spread"><h2>项目配置</h2>'+label('v'+p.version)+'</div>'+
    '<dl>'+field('执行模式',modeNames[p.mode])+
    '<dt>'+(imported?'数据来源':'代码仓库地址')+'</dt><dd>'+source+'</dd>'+
@@ -615,6 +623,17 @@ function modal(title,kind,fields,submit){
  const m=$('#modal');m.innerHTML='<h2>'+E(title)+'</h2><form class="fields" data-form="'+kind+'">'+fields+'<p class="submit-error" role="alert"></p><div class="flex">'+btn('取消','close')+'<button class="primary">'+E(submit)+'</button></div></form>';if(!m.open)m.showModal();
 }
 function projectForm(p={},attach=false){
+ if(p.adapter!=='mock'){
+   const fields=[['name','项目名称'],['repo','本机 Git 仓库目录'],['baseline','基线名称'],['dataset','数据文件路径'],['train','训练命令'],['evaluate','评测命令']];
+   return modal(p.id?'编辑配置':'初始化研究项目','workspace',
+     '<p class="muted">使用已提交的代码、可读取的数据文件和固定评测命令。训练与评测在本机运行。</p>'+
+     fields.map(([k,t])=>input(k,t,p[k])).join('')+input('primary_metric','主指标',p.primary_metric)+
+     '<label>指标方向'+pick('metric_direction',[['min','越低越好'],['max','越高越好']],p.metric_direction)+'</label>'+
+     input('baseline_value','基线分数',p.baseline_value,'number')+input('seed','随机种子',p.seed??42,'number')+
+     '<input type="hidden" name="kind" value="local-project"><input type="hidden" name="mode" value="local">'+
+     '<input type="hidden" name="id" value="'+E(p.id)+'"><input type="hidden" name="attach" value="'+(attach?'yes':'no')+'">'+btn('检查配置','check'),'保存项目');
+ }
+
  const fields=[['name','项目名称'],['repo','代码地址'],['baseline','默认基线'],['dataset','数据版本'],['train','训练入口'],['evaluate','评测入口']];
  modal(p.id?'编辑项目配置':'初始化研究项目','workspace','<p class="muted">保存后，TripSci 会在自己的项目存储中保存配置。三种模式目前均使用本机模拟训练。</p>'+
  fields.map(([k,t])=>input(k,t,p[k])).join('')+input('floor','整体 AUC 下限',p.floor??.715,'number')+
@@ -634,6 +653,9 @@ function planForm(){
 }
 function agentForm(a={},runtime=a.runtime||'local-process'){modal(a.id?'编辑智能体':'创建智能体 · 2 / 2','agent','<p>运行时：'+E(runtimeName(runtime))+'</p><input type="hidden" name="runtime" value="'+E(runtime)+'">'+input('name','名称',a.name)+area('instructions','Markdown 指令',a.instructions||'比较实验结果，遵守护栏。')+'<label><input type="checkbox" name="wide" '+(a.skills?.includes('wide-search')?'checked':'')+'> 启用 wide-search</label>'+all('skill').map(x=>'<label><input type="checkbox" name="skill" value="'+E(x.id)+'" '+(a.skills?.includes(x.id)?'checked':'')+'> '+E(x.name)+'</label>').join('')+'<input type="hidden" name="id" value="'+E(a.id)+'">','保存配置')}
 const payload=f=>Object.fromEntries(new FormData(f));
+const projectPayload=d=>d.kind==='local-project'
+ ? {...d,baseline_value:Number(d.baseline_value),seed:Number(d.seed)}
+ : {...d,floor:Number(d.floor)};
 const close=()=>$('#modal').close();
 function saveAgent(a,patch){return act({op:'agent',id:a.id,name:a.name,runtime:a.runtime,instructions:a.instructions,skills:a.skills,...patch},close)}
 document.addEventListener('click',e=>{for(const d of document.querySelectorAll('.switcher[open]'))if(!d.contains(e.target))d.open=false});
@@ -711,15 +733,26 @@ document.addEventListener('click',e=>{
  if(a==='attach')return modal('关联项目','attach',all('workspace').length?'<label>项目'+pick('workspace',all('workspace').map(x=>[x.id,x.name]),get('plan',id)?.workspace)+'</label>':'<p>还没有项目。</p>'+btn('新建项目','projectForPlan'),'关联');
  if(a==='start'){
    const p=get('plan',id),env=get('workspace',p?.workspace);if(!env)return;
+   if(env.adapter==='local-project'){
+     const workers=all('agent').filter(x=>x.role!=='supervisor'&&x.runtime==='codex');
+     if(!workers.length)return modal('选择研究 Worker','noIntegration','<p>请先在智能体页面创建一个 Codex Worker。</p>','知道了');
+     return modal('确认并启动实验','start',area('design','已确认的实验设计',p.direction)+
+       kv('主指标',env.primary_metric)+input('budget','实验预算（1–10）',3,'number')+
+       '<label>执行者'+pick('agent',workers.map(x=>[x.id,x.name+' · v'+x.version]))+'</label>','启动研究');
+   }
    const bean=env.adapter==='beans', ntl=env.adapter==='name-llm', real=bean||ntl||env.adapter==='iris';
    const extra=ntl?'<label>研究策略'+pick('strategy',[['char','字符 n-gram'],['style','文体与标点'],['adaptive','自由迭代']])+'</label>':bean?'<label>研究策略'+pick('strategy',[['centroid','质心与特征消融'],['bayes','高斯朴素贝叶斯'],['adaptive','自适应特征权重']])+'</label><label>运行方式'+pick('run_mode',[['bounded','固定轮次'],['continuous','持续迭代（自适应策略）']])+'</label><div id="loopInterval" hidden>'+input('interval','轮次间隔（秒）',30,'number')+'</div>':'';
    const research=ntl?'<label>研究决策'+pick('research_mode',[['codex','Codex 自主研究 · 根据目标和证据选择下一轮'],['rules','内置策略 · 固定扫描或参数搜索']])+'</label>':!real&&env.mode==='local'?'<label>研究决策'+pick('research_mode',[['rules','内置规则'],['codex','Codex 研究决策（模拟评测）']])+'</label>':'';
    return modal('确认并启动实验','start','<p>'+E(env.name)+' · '+E(modeNames[env.mode])+(real?' · 真实数据</p>':' · 模拟</p>')+kv('数据',env.dataset)+kv(real?'准确率下限':'整体 AUC 下限',env.floor)+(real?kv('固定基线',env.baseline):input('baseline','对照基线',env.baseline))+area('design','已确认的实验设计',p.direction)+research+(ntl?'<div id="rule-strategy" hidden>'+extra+'</div>':extra)+'<div id="roundBudget">'+input('budget','实验预算（1–10）',ntl?4:3,'number')+'</div><label>执行者'+pick('agent',all('agent').filter(x=>x.role!=='supervisor'&&(x.runtime==='local-process'||((env.mode==='local'&&(ntl||!real))&&x.runtime==='codex'))).map(x=>[x.id,x.name+' · v'+x.version]))+'</label>',real?'启动本机评测':'启动模拟研究');
  }
- if(a==='feedback')return modal('给 Worker 反馈','feedback','<p>当前训练继续。可发送「保守」或「强度 0.55」来改变下一轮。</p>'+area('text','反馈'),'发送反馈');
+ if(a==='feedback'){
+   const agentLed=task(get('plan',id))?.research_mode==='agent';
+   const guidance=agentLed?'描述希望验证的假设、需要关注的证据，或调整建议。Worker 会在下一轮读取。':'当前训练继续，反馈将在下一轮读取。';
+   return modal('给 Worker 反馈','feedback','<p>'+guidance+'</p>'+area('text','反馈'),'发送反馈');
+ }
  if(a==='check'){
    const f=$('#modal form');if(!f.reportValidity())return;
-   const d=payload(f);act({...d,op:'check',floor:Number(d.floor)},r=>{const el=$('#modal .submit-error');if(el)el.textContent=r.message});return;
+   const d=payload(f);act({...projectPayload(d),op:'check'},r=>{const el=$('#modal .submit-error');if(el)el.textContent=r.message});return;
  }
  if(['pause','resume','decision'].includes(a))act({op:a,id,value:k});
 });
@@ -798,7 +831,7 @@ document.addEventListener('submit',async e=>{
  });
  if(op==='workspace'){
    const attach=d.attach==='yes', plan=id;delete d.attach;
-   return act({...d,op,attach_plan:attach?plan:'',floor:Number(d.floor)},r=>{close();project=r.id;if(!attach){page='项目';id=r.id;rememberView(page,id)}});
+   return act({...projectPayload(d),op,attach_plan:attach?plan:''},r=>{close();project=r.id;if(!attach){page='项目';id=r.id;rememberView(page,id)}});
  }
  if(op==='noIntegration')return close();
  if(op==='integration'){
@@ -824,7 +857,7 @@ document.addEventListener('submit',async e=>{
    return act({op:'agent_permissions',id:f.dataset.key,permissions},()=>notice('设置已保存'),message=>{f.querySelector('.submit-error').textContent=message});
  }
  if(op==='agentInstructions'||op==='renameAgent')return saveAgent(get('agent',id),d);
- if(op==='agent')return act({...d,op,skills:['adaptive-ctr',...(d.wide?['wide-search']:[]),...new FormData(f).getAll('skill')]},r=>{close();id=r.id;agentTab='概览';notice('智能体配置已保存')});
+ if(op==='agent')return act({...d,op,skills:[...(d.runtime==='local-process'?['adaptive-ctr']:[]),...(d.wide?['wide-search']:[]),...new FormData(f).getAll('skill')]},r=>{close();id=r.id;agentTab='概览';notice('智能体配置已保存')});
  if(op==='settings')return act({op,delay:Number(d.delay),slots:Number(d.slots)},()=>notice('已保存设置'));
  if(op==='attach'&&!d.workspace)return notice('请先新建项目');
  if(op==='start'){d.budget=Number(d.budget);if(d.interval!=null)d.interval=Number(d.interval)}

@@ -24,7 +24,7 @@ class NativeAPI(unittest.TestCase):
         self.proc.stdout.close()
 
     def start(self):
-        proc = subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/"tests/chat_fixture_server.py"),
+        proc = subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/"chat_fixture_server.py"),
                                  "--state",str(self.root),"--port","0"], stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL,text=True)
         self.proc = proc

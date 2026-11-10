@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-import beans
+from legacy.benchmarks import beans
 from run_workspace import attempt_dir, run_dir
 
 TRAINING_TIMEOUT = 120
@@ -112,7 +112,7 @@ def train_job(root, workspace, job_id, adapter="beans", number=0):
                 candidate=json.loads((repo/"models"/f"{job_id}.json").read_text())
                 manifest=None
             if adapter=="name-llm":
-                import name_llm
+                from legacy.benchmarks import name_llm
                 if manifest is None:
                     manifest=json.loads((repo/"evaluation/name-llm-protocol.json").read_text())
                 diagnostics = {}

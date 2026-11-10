@@ -286,7 +286,7 @@ class ResearchTest(unittest.TestCase):
             proc.stdout.close()
 
         def start():
-            proc = subprocess.Popen([sys.executable,str(ROOT.parent/'tests/chat_fixture_server.py'),'--state',str(self.root),'--port','0'],
+            proc = subprocess.Popen([sys.executable,str(ROOT.parent/'chat_fixture_server.py'),'--state',str(self.root),'--port','0'],
                                     stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
             self.addCleanup(stop,proc)
             address = proc.stdout.readline().strip()

@@ -28,7 +28,7 @@ def supervisor_definition(config=None):
     }
 
 OPERATIONS = {
-    "workspace": ("新建项目或编辑项目配置", "id name repo baseline dataset train evaluate mode floor training_host delivery agent_host remote_dir"),
+    "workspace": ("新建项目或编辑项目配置", "id name repo baseline dataset train evaluate mode floor training_host delivery agent_host remote_dir kind primary_metric metric_direction baseline_value seed"),
     "plan": ("创建研究计划草稿", "title direction workspace"),
     "start": ("确认并委派研究计划", "id design budget agent baseline strategy research_mode run_mode interval"),
     "feedback": ("发送 Worker 反馈", "id text"),

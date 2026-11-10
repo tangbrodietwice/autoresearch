@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     f"topic {prompt}. "+["First, then, finally.","A quick note — precisely!","Summary: give an example."][i],f"fixture-{i}"])
     subprocess.run([sys.executable,"scripts/prepare-name-llm.py",str(source),"--state",str(state),"--fixture"],
                    cwd=root,check=True,stdout=subprocess.DEVNULL)
-    server=subprocess.Popen([sys.executable,"backend/app.py","--state",str(state),"--port","0"],
+    server=subprocess.Popen([sys.executable,"tripsci/app.py","--state",str(state),"--port","0"],
                             cwd=root,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     try:
         url=server.stdout.readline().strip()
