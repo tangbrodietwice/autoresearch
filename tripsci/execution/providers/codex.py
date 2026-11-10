@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory, TemporaryFile
 import threading
 import time
 
-from codex_environment import codex_environment
+from .codex_environment import codex_environment
 
 
 class ProviderError(Exception):

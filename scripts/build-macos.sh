@@ -5,7 +5,7 @@ app="${1:-$PWD/.build/TripSci.app}"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/tripsci"
 mkdir -p .build/module-cache
 /usr/bin/swiftc -module-cache-path "$PWD/.build/module-cache" -O -parse-as-library -target "$(uname -m)-apple-macosx14.0" apps/macos/TripSci.swift -o "$app/Contents/MacOS/TripSci"
-cp tripsci/{app,server,scheduler,worker,mock_training,native_api,runtime,run_workspace,storage,main_chat,codex_environment}.py "$app/Contents/Resources/tripsci/"
+cp tripsci/{app,server,scheduler,worker_entrypoint,mock_training,workspace_api,run_workspace,storage,main_chat}.py "$app/Contents/Resources/tripsci/"
 cp -R tripsci/actions tripsci/execution tripsci/agents tripsci/research tripsci/skills tripsci/legacy "$app/Contents/Resources/tripsci/"
 cp apps/macos/TripSci-icon.png "$app/Contents/Resources/"
 iconset="$(mktemp -d)"

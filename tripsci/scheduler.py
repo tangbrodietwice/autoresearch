@@ -1,7 +1,8 @@
 """Deterministic research scheduling and training recovery."""
 from mock_training import MockTraining
 from run_workspace import attempt_dir
-from runtime import TRAINING_TIMEOUT
+from execution.attempts import append_attempt
+from execution.local_process import TRAINING_TIMEOUT
 from storage import CONSTRAINTS
 from storage import SEED
 import json
@@ -76,7 +77,7 @@ class TaskManager:
         if attempt and attempt["state"] == "dispatch_pending":
             number = attempt["number"]
             directory = attempt_dir(self.p.root,job["id"],number)
-            if (directory/"result.json").exists() or runtime.training_locked(directory):
+            if (directory/"result.json").exists() or runtime.attempt_lock_held(directory):
                 attempt.update(state="running",started_at=attempt.get("requested_at",now))
                 self.p.put(db,"job",job["id"],job)
             else:
@@ -120,7 +121,7 @@ class TaskManager:
                 runtime.stop_training(job["id"],number)
                 self.training_failure(db,task,job,attempt,"timeout",now)
                 return None
-            locked = runtime.training_locked(directory)
+            locked = runtime.attempt_lock_held(directory)
             if number != 0:
                 if not locked and not runtime.owns_training(job["id"],number) and now-attempt["started_at"] >= 2:
                     self.training_failure(db,task,job,attempt,"missing_receipt",now)
@@ -132,10 +133,9 @@ class TaskManager:
             attempts.pop()
         if task["status"] != "waiting" or now < job.get("retry_at",0):
             return None
-        number = attempts[-1]["number"]+1 if attempts else 1
-        attempt = {"number":number,"state":"dispatch_pending","requested_at":now,
-                   "log":str(attempt_dir(self.p.root,job["id"],number).relative_to(self.p.root)/"worker.log")}
-        attempts.append(attempt)
+        attempt = append_attempt(job, "dispatch_pending", requested_at=now)
+        number = attempt["number"]
+        attempt["log"] = str(attempt_dir(self.p.root, job["id"], number).relative_to(self.p.root) / "worker.log")
         task["phase"] = "waiting"
         self.p.put(db,"job",job["id"],job)
         launches.append((task["id"],task["workspace"],job["id"],job["adapter"],number))

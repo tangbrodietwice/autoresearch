@@ -53,7 +53,14 @@ Web 默认状态保存在 `.state/web`。可用 `--state` 指定其他状态目�
 
 ### 单轮运行目录
 
-`tripsci/app.py` 负责 HTTP 和调度，`tripsci/storage.py` 管理 SQLite 与 Git 工件，`tripsci/runtime.py` 启动本机 Worker 和训练进程。`tripsci/run_workspace.py` 管理可复查的运行目录。
+想读代码，可以沿着一次「启动研究计划」往下看：
+
+1. [app.py](tripsci/app.py) 启动服务，[server.py](tripsci/server.py) 接收 HTTP 请求，[workspace_api.py](tripsci/workspace_api.py) 将工作台操作交给 [actions/plans.py](tripsci/actions/plans.py)。
+2. [scheduler.py](tripsci/scheduler.py) 决定何时派发任务，[local_process.py](tripsci/execution/local_process.py) 启动本机子进程。
+3. [worker_entrypoint.py](tripsci/worker_entrypoint.py) 选择执行路径。通用 ML 项目读 [research/local_worker.py](tripsci/research/local_worker.py)，内置实验读 [legacy/worker.py](tripsci/legacy/worker.py)。
+4. [storage.py](tripsci/storage.py) 管理 SQLite 和 Git，[run_workspace.py](tripsci/run_workspace.py) 管理运行目录和文件。
+
+业务关系是项目（`workspace`）→ 研究计划（`plan`）→ 执行任务（`task`）→ 多轮实验（`experiment`）。Worker 配置在计划启动时快照到任务。更多分工见 [架构说明](docs/architecture.md)。
 
 新提交的实验会在状态目录下生成 `runs/<job-id>/`，包含运行清单、候选代码或参数、评测协议、完成后的报告和结果。有关联智能体时还会记录启动时的 `AGENTS.md` 和已绑定的自定义 `skills/<id>/SKILL.md`。本机独立训练进程的回执和日志按尝试号存放于 `attempts/`。旧实验仍可通过原有 Git 工作区查看。
 

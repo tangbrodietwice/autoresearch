@@ -3,11 +3,11 @@ import argparse
 from pathlib import Path
 
 from mock_training import MockTraining
-from runtime import RuntimeAdapter
+from execution.local_process import LocalProcessRunner
 from scheduler import TaskManager
 from server import serve
 from storage import Project
-from worker import ResearchWorker
+from worker_entrypoint import ResearchWorker
 
 BASE = Path(__file__).resolve().parent
 

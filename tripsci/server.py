@@ -4,9 +4,9 @@ from http.server import ThreadingHTTPServer
 from main_chat import ChatError
 from main_chat import MainChat
 from main_chat import codex_chat
-from native_api import WorkspaceAPI
+from workspace_api import WorkspaceAPI
 from run_workspace import recover_results
-from runtime import RuntimeAdapter
+from execution.local_process import LocalProcessRunner
 from scheduler import TaskManager
 from storage import CONSTRAINTS
 import hashlib
@@ -23,7 +23,7 @@ def serve(project, port, chat_model=codex_chat):
     chat = MainChat(project, chat_model)
     chat.recover_turns()
     workspace = WorkspaceAPI(project,manager)
-    runtime = RuntimeAdapter(project.root)
+    runtime = LocalProcessRunner(project.root)
 
     def schedule():
         while True:

@@ -13,10 +13,10 @@ from legacy.benchmarks import beans
 from run_workspace import attempt_dir, run_dir
 
 TRAINING_TIMEOUT = 120
-BASE = Path(__file__).resolve().parent
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
-class RuntimeAdapter:
+class LocalProcessRunner:
     def __init__(self, root):
         self.root = root
         self.training = {}
@@ -28,8 +28,8 @@ class RuntimeAdapter:
         directory.mkdir(parents=True,exist_ok=True)
         with (directory/"worker.log").open("ab") as log:
             self.training[job_id,number] = subprocess.Popen(
-                [sys.executable,str(BASE/"runtime.py"),str(self.root),workspace,job_id,adapter,str(number)],
-                stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
+                [sys.executable,"-m","execution.local_process",str(self.root),workspace,job_id,adapter,str(number)],
+                stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,cwd=BACKEND_DIR)
 
     def owns_training(self, job_id, number):
         return (job_id,number) in self.training
@@ -47,7 +47,7 @@ class RuntimeAdapter:
                 pass
 
     @staticmethod
-    def training_locked(directory):
+    def attempt_lock_held(directory):
         path = directory/"lock"
         if not path.exists():
             return False
@@ -67,23 +67,23 @@ class RuntimeAdapter:
             del self.research[key]
             if status:
                 raise subprocess.CalledProcessError(status, "research worker")
-        return self.training_locked(self.root / "decisions" / key)
+        return self.attempt_lock_held(self.root / "decisions" / key)
 
     def start_research(self, key):
         directory = self.root / "decisions" / key
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / "worker.log").open("ab") as log:
             self.research[key] = subprocess.Popen(
-                [sys.executable, str(BASE/"app.py"), "--state", str(self.root), "--worker", key],
+                [sys.executable, str(BACKEND_DIR/"app.py"), "--state", str(self.root), "--worker", key],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
             )
 
     def run(self, key):
-        subprocess.run([sys.executable, str(BASE/"app.py"), "--state", str(self.root), "--worker", key],
+        subprocess.run([sys.executable, str(BACKEND_DIR/"app.py"), "--state", str(self.root), "--worker", key],
                        check=True, timeout=30)
 
 
-def train_job(root, workspace, job_id, adapter="beans", number=0):
+def run_training_attempt(root, workspace, job_id, adapter="beans", number=0):
     job = attempt_dir(root,job_id,number)
     job.mkdir(parents=True,exist_ok=True)
     receipt = job/"result.json"
@@ -142,4 +142,4 @@ if __name__=="__main__":
     parser.add_argument("number",type=int,nargs="?",default=0)
     args=parser.parse_args()
     signal.alarm(TRAINING_TIMEOUT)
-    train_job(args.root,args.workspace,args.job,args.adapter,args.number)
+    run_training_attempt(args.root,args.workspace,args.job,args.adapter,args.number)

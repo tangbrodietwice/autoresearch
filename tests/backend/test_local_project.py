@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from app import Project, ResearchWorker, TaskManager
-from native_api import WorkspaceAPI
+from workspace_api import WorkspaceAPI
 from research.project_runner import git
 from run_workspace import recover_results
 
@@ -48,7 +48,9 @@ class LocalRegression(unittest.TestCase):
                 plan = action("start", id=plan["id"], agent=agent["id"], budget=2)
             key = plan["task"]
             calls = []
+            analysis_calls = 0
             def model(provider, prompt, schema, **options):
+                nonlocal analysis_calls
                 self.assertEqual(provider, "codex")
                 checkout = options["workspace"]
                 if checkout:
@@ -57,12 +59,16 @@ class LocalRegression(unittest.TestCase):
                     # The trusted evaluator must come from the baseline, not the candidate.
                     (checkout / "score.py").write_text("raise RuntimeError('candidate evaluator ran')\n")
                     return dict(action="run", hypothesis="Closer prediction", expected="lower RMSE", rationale="evidence")
+                analysis_calls += 1
+                if analysis_calls == 1:
+                    raise ValueError("temporary analysis failure")
                 return dict(conclusion="Error decreased", expectation="met", next_step="refine prediction")
 
             with patch("research.local_worker.run_json", side_effect=model):
                 ResearchWorker(project).run(key)
                 project = Project(root / "state")
                 recover_results(project)
+                action("retry", id=plan["id"])
                 ResearchWorker(project).run(key)
                 recover_results(project)
                 ResearchWorker(project).run(key)
@@ -73,6 +79,10 @@ class LocalRegression(unittest.TestCase):
             with project.tx(readonly=True) as db:
                 experiments = sorted(project.all(db, "experiment"), key=lambda r: r["round"])
                 state = api.state(db)
+                jobs = [project.get(db, "job", row["job"]) for row in experiments]
+            self.assertEqual([len(job["attempts"]) for job in jobs], [1, 1])
+            self.assertEqual([job["attempts"][0]["state"] for job in jobs], ["succeeded", "succeeded"])
+            self.assertEqual([job["result"]["rmse"] for job in jobs], [7.0, 4.0])
             self.assertEqual([r["result"]["rmse"] for r in experiments], [7.0, 4.0])
             self.assertTrue(all(r["accepted"] for r in experiments))
             self.assertEqual(state["plan"][0]["report"]["candidate"]["result"], {"rmse": 4.0})

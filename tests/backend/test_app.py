@@ -9,7 +9,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from app import MockTraining, Project, ResearchWorker, RuntimeAdapter, TaskManager
+from app import MockTraining, Project, ResearchWorker, LocalProcessRunner, TaskManager
 
 ROOT = Path(__file__).resolve().parent
 
@@ -21,7 +21,7 @@ class ResearchTest(unittest.TestCase):
         self.root = Path(temp.name)
 
     def test_worker_failure_stops_until_retry(self):
-        from native_api import WorkspaceAPI
+        from workspace_api import WorkspaceAPI
         p = Project(self.root)
         manager = TaskManager(p)
         api = WorkspaceAPI(p, manager)
@@ -37,11 +37,11 @@ class ResearchTest(unittest.TestCase):
         with p.tx() as db:
             task = p.get(db, "task", key)
             self.assertEqual((task["status"], task["round"]), ("failed", 0))
-        manager.tick(RuntimeAdapter(self.root))
+        manager.tick(LocalProcessRunner(self.root))
         with p.tx() as db:
             self.assertEqual(p.get(db, "task", key)["status"], "failed")
             api.action(db, {"op": "retry", "id": "test-plan"})
-        manager.tick(RuntimeAdapter(self.root))
+        manager.tick(LocalProcessRunner(self.root))
         with p.tx() as db:
             task = p.get(db, "task", key)
             self.assertEqual((task["status"], task["round"]), ("waiting", 1))
@@ -116,7 +116,7 @@ class ResearchTest(unittest.TestCase):
         manager.training_timeout = .1
         manager.max_training_attempts = 4
 
-        class BrokenRuntime(RuntimeAdapter):
+        class BrokenRuntime(LocalProcessRunner):
             def launch_training(self, workspace, job_id, adapter, number):
                 if number==1:
                     raise OSError(2,"injected launch failure")
@@ -208,7 +208,7 @@ class ResearchTest(unittest.TestCase):
         manager = TaskManager(project)
         launched = []
 
-        class RecordingRuntime(RuntimeAdapter):
+        class RecordingRuntime(LocalProcessRunner):
             def launch_training(self, workspace, job_id, adapter, number):
                 launched.append((job_id, number))
 
@@ -259,13 +259,13 @@ class ResearchTest(unittest.TestCase):
         with p.tx() as db:
             p.put(db,'settings','active',{'runtime':'local-process','skills':['adaptive-ctr','wide-search'],'delay':.1})
             key = m.create(db, 'CTR', 10)
-        m.tick(RuntimeAdapter(self.root))
+        m.tick(LocalProcessRunner(self.root))
         with p.tx() as db:
             self.assertEqual(p.get(db,'task',key)['status'],'waiting')
             m.feedback(db, key, '保守')
         for _ in range(10):
             time.sleep(.12)
-            m.tick(RuntimeAdapter(self.root))
+            m.tick(LocalProcessRunner(self.root))
         with p.tx() as db:
             records = p.all(db,'experiment')
             self.assertEqual(len(records),10)

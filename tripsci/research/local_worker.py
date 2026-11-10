@@ -7,6 +7,7 @@ import time
 import uuid
 
 from execution import ProviderError, run_json
+from execution.attempts import execute_recorded
 from research.project_runner import clone, evaluate, git, read_metrics
 from run_workspace import write_json, write_text
 
@@ -64,21 +65,24 @@ def candidate(directory, task, previous, prompt):
     return proposal
 
 
-def run_trial(directory, env, proposal):
-    result_path = directory / "metrics.json"
-    if result_path.exists():
-        return read_metrics(result_path, env["primary_metric"])
-    checkout = Path(proposal["checkout"])
-    # Each retry gets a fresh checkout and independent logs.
-    attempt = directory / "attempts" / uuid.uuid4().hex
-    attempt.mkdir(parents=True)
-    candidate_tree = attempt / "candidate"
-    evaluation_tree = attempt / "evaluation"
-    clone(checkout, candidate_tree, proposal["revision"])
-    clone(env["repo"], evaluation_tree, env["source_revision"])
-    metrics = evaluate(env, candidate_tree, attempt, evaluation_tree)
-    write_json(result_path, metrics)
-    return metrics
+def run_trial(project, task, directory, proposal):
+    env = task["environment"]
+    old_result = directory / "metrics.json"
+
+    def evaluate_attempt(attempt):
+        candidate_tree = attempt / "candidate"
+        evaluation_tree = attempt / "evaluation"
+        clone(Path(proposal["checkout"]), candidate_tree, proposal["revision"])
+        clone(env["repo"], evaluation_tree, env["source_revision"])
+        return evaluate(env, candidate_tree, attempt, evaluation_tree)
+
+    def read_result(path):
+        return read_metrics(path, env["primary_metric"])
+
+    if old_result.is_file():
+        return read_result(old_result)
+    return execute_recorded(project, directory.name, task, "local-project", directory,
+                            evaluate_attempt, read_result)
 
 
 def context(task, previous, feedback):
@@ -114,8 +118,10 @@ def record_trial(project, manager, task, feedback, directory, proposal, metrics,
                   research_proposal=proposal, research_analysis=analysis,
                   report=str(report.relative_to(project.root)), run_path=str(directory.relative_to(project.root)),
                   adapter="local-project")
-    write_json(directory / "result.json", record)
     with project.tx() as db:
+        if project.get(db, "job", identifier):
+            record["job"] = identifier
+        write_json(directory / "result.json", record)
         latest = project.get(db, "task", key)
         if latest["round"] != task["round"]:
             return
@@ -172,7 +178,7 @@ def run(project, manager, key):
                     return
                 latest["phase"] = "training"
                 manager.save(db, latest, "Running configured training and evaluation")
-            metrics = run_trial(directory, env, proposal)
+            metrics = run_trial(project, task, directory, proposal)
             analysis = ask(task, prompt + "\n根据以下实验与实际指标，解释结果和是否符合预期：\n"
                            + json.dumps({"hypothesis": proposal["hypothesis"],
                                          "expected": proposal["expected"], "metrics": metrics},
