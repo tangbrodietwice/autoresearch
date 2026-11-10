@@ -714,7 +714,7 @@ document.addEventListener('click',e=>{
    const bean=env.adapter==='beans', ntl=env.adapter==='name-llm', real=bean||ntl||env.adapter==='iris';
    const extra=ntl?'<label>研究策略'+pick('strategy',[['char','字符 n-gram'],['style','文体与标点'],['adaptive','自由迭代']])+'</label>':bean?'<label>研究策略'+pick('strategy',[['centroid','质心与特征消融'],['bayes','高斯朴素贝叶斯'],['adaptive','自适应特征权重']])+'</label><label>运行方式'+pick('run_mode',[['bounded','固定轮次'],['continuous','持续迭代（自适应策略）']])+'</label><div id="loopInterval" hidden>'+input('interval','轮次间隔（秒）',30,'number')+'</div>':'';
    const research=ntl?'<label>研究决策'+pick('research_mode',[['codex','Codex 自主研究 · 根据目标和证据选择下一轮'],['rules','内置策略 · 固定扫描或参数搜索']])+'</label>':!real&&env.mode==='local'?'<label>研究决策'+pick('research_mode',[['rules','内置规则'],['codex','Codex 研究决策（模拟评测）']])+'</label>':'';
-   return modal('确认并启动实验','start','<p>'+E(env.name)+' · '+E(modeNames[env.mode])+(real?' · 真实数据</p>':' · 模拟</p>')+kv('数据',env.dataset)+kv(real?'准确率下限':'整体 AUC 下限',env.floor)+(real?kv('固定基线',env.baseline):input('baseline','对照基线',env.baseline))+area('design','已确认的实验设计',p.direction)+research+(ntl?'<div id="rule-strategy" hidden>'+extra+'</div>':extra)+'<div id="roundBudget">'+input('budget','实验预算（1–10）',ntl?4:3,'number')+'</div><label>执行者'+pick('agent',all('agent').filter(x=>x.runtime==='local-process').map(x=>[x.id,x.name+' · v'+x.version]))+'</label>',real?'启动本机评测':'启动模拟研究');
+   return modal('确认并启动实验','start','<p>'+E(env.name)+' · '+E(modeNames[env.mode])+(real?' · 真实数据</p>':' · 模拟</p>')+kv('数据',env.dataset)+kv(real?'准确率下限':'整体 AUC 下限',env.floor)+(real?kv('固定基线',env.baseline):input('baseline','对照基线',env.baseline))+area('design','已确认的实验设计',p.direction)+research+(ntl?'<div id="rule-strategy" hidden>'+extra+'</div>':extra)+'<div id="roundBudget">'+input('budget','实验预算（1–10）',ntl?4:3,'number')+'</div><label>执行者'+pick('agent',all('agent').filter(x=>x.role!=='supervisor'&&(x.runtime==='local-process'||((env.mode==='local'&&(ntl||!real))&&x.runtime==='codex'))).map(x=>[x.id,x.name+' · v'+x.version]))+'</label>',real?'启动本机评测':'启动模拟研究');
  }
  if(a==='feedback')return modal('给 Worker 反馈','feedback','<p>当前训练继续。可发送「保守」或「强度 0.55」来改变下一轮。</p>'+area('text','反馈'),'发送反馈');
  if(a==='check'){
@@ -731,6 +731,10 @@ document.addEventListener('change',e=>{
  }
  if(e.target.name==='趋势指标'){chartChoices[current().id]=e.target.value;render()}
  if(e.target.name==='strategy'&&get('workspace',get('plan',id)?.workspace)?.adapter==='name-llm')$('#roundBudget input').value=e.target.value==='adaptive'?20:4;
+ if(e.target.name==='agent'&&e.target.closest('form')?.dataset.form==='start'){
+   const mode=$('#modal select[name=research_mode]');
+   if(mode&&get('agent',e.target.value)?.runtime==='codex'){mode.value='codex';mode.dispatchEvent(new Event('change',{bubbles:true}))}
+ }
  if(e.target.name==='research_mode'&&$('#rule-strategy'))$('#rule-strategy').hidden=e.target.value==='codex';
  if(e.target.name==='run_mode'){
    const continuous=e.target.value==='continuous';$('#roundBudget').hidden=continuous;$('#loopInterval').hidden=!continuous;

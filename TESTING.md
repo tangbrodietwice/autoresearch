@@ -47,3 +47,18 @@ Chromium 通过：无项目引导、从项目列表进入看板、从项目创�
 
 - Chromium 在看板底部等待后台数据发生变化，确认滚动位置保留；打开右下角聊天发送消息并收起后，仍在原看板和原位置。
 - `python3 tests/name_llm_smoke.py` 使用独立的合成文本，验证按提示分组、并行调度、4／4／20 轮不重复配置以及保留集报告。合成数据不作为 Kaggle 比赛成绩。
+
+## Unified agent execution checkpoint
+
+- Baseline: 20 backend tests passed before changes. After the split, 22 passed,
+  including HTTP restart, training deduplication, supervisor approval and shared
+  Codex adapter constraints. Run with `scripts/check.sh`.
+- Web smoke, real Iris, real concurrent Dry Bean and synthetic Name That LLM
+  passed. Dry Bean uses fixture chat so that external model latency does not
+  mask the CPU scheduling checks. This is not a live Codex test.
+- Browser navigation, empty and populated views, research chat on desktop and
+  mobile widths, reports and dashboards passed using installed Chrome.
+- An isolated macOS bundle built and passed signature verification and packaged
+  Python import checks. This does not verify an interactive native window.
+- Live Codex research on the existing Name That LLM project, second-provider
+  execution and live workspace migration are pending.

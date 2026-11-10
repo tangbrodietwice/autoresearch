@@ -1,4 +1,4 @@
-"""Exercise real concurrent CPU jobs and continuous-plan completion in disposable state."""
+"""Exercise real concurrent CPU jobs and continuous-plan completion with fixture chat and disposable state."""
 from pathlib import Path
 import subprocess
 import sys
@@ -7,7 +7,7 @@ import tempfile
 ROOT=Path(__file__).resolve().parents[1]
 
 with tempfile.TemporaryDirectory() as state:
-    with subprocess.Popen([sys.executable,"backend/app.py","--state",state,"--port","0"],
+    with subprocess.Popen([sys.executable,"tests/chat_fixture_server.py","--state",state,"--port","0"],
                           cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True) as server:
         try:
             address=server.stdout.readline().strip()

@@ -2,11 +2,8 @@
 import hashlib
 import json
 import math
-import shutil
-import subprocess
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from codex_environment import codex_environment
+from execution import ProviderError, run_json
 
 from run_workspace import write_json
 
@@ -92,6 +89,7 @@ def snapshot(project, db, task):
         "history": history, "tried": [row["strength"] for row in histories] + ([job["strength"]] if job else []),
         "feedback": feedback, "agent_instructions":agent.get("instructions", ""),
         "custom_skills":[row["markdown"] for row in agent.get("skill_files", [])],
+        **({"provider": task["decision_provider"]} if task.get("decision_provider") else {}),
         "scientific_skill":task.get("scientific_skill") or SKILL.read_text(encoding="utf-8"),
     }
 
@@ -165,9 +163,6 @@ def validate(decision, context):
 
 
 def decide(root, context):
-    executable = shutil.which("codex")
-    if not executable:
-        raise ValueError("找不到 Codex CLI")
     skill = context["scientific_skill"]
     digest = hashlib.sha256(json.dumps(context,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
     cached = root / "decisions" / context["task"] / (digest + ".json")
@@ -195,27 +190,10 @@ def decide(root, context):
         "Explain observations and alternatives without asserting causal mechanisms. Write short Chinese text.\n"
         + skill + "\nContext:\n" + json.dumps(context, ensure_ascii=False)
     )
-    with TemporaryDirectory(prefix="tripsci-research-") as path:
-        directory = Path(path)
-        schema, output = directory/"schema.json", directory/"decision.json"
-        write_json(schema, TEXT_SCHEMA if text_task else SCHEMA)
-        proc = subprocess.run(
-            [executable, "exec", "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
-             "--skip-git-repo-check", "--ephemeral", "--disable", "shell_tool",
-             "-c", 'web_search="disabled"', "--cd", path, "--output-schema", str(schema),
-             "--output-last-message", str(output), "-"],
-            input=prompt, capture_output=True, text=True, timeout=120, cwd=path, env=codex_environment(),
-        )
-        if proc.returncode or not output.is_file():
-            details = proc.stderr.lower()
-            if "operation not permitted" in details:
-                raise ValueError("Codex 无法在当前进程权限下初始化")
-            if "unauthorized" in details or "401" in details:
-                raise ValueError("Codex 登录授权未通过")
-            if "timed out" in details or "error sending request" in details:
-                raise ValueError("Codex 服务连接失败")
-            raise ValueError(f"Codex 未返回研究决策（退出码 {proc.returncode}）")
-        result = json.loads(output.read_text())
+    try:
+        result = run_json(context.get("provider", "codex"), prompt, TEXT_SCHEMA if text_task else SCHEMA, timeout=120)
+    except ProviderError as exc:
+        raise ValueError(f"研究决策执行失败：{exc}") from exc
     validate(result, context)
     write_json(cached, result)
     return result

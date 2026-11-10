@@ -2,16 +2,12 @@
 import fcntl
 import hashlib
 import json
-import queue
 import re
-import shutil
-import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
-from tempfile import TemporaryDirectory, TemporaryFile
-from codex_environment import codex_environment
+from execution import ProviderError, run_json
 
 
 class ChatError(Exception):
@@ -72,78 +68,7 @@ RESPONSE_SCHEMA = {
 }
 
 
-def run_active_codex(command, prompt, directory, progress):
-    events = queue.Queue()
-
-    def read_events(stream):
-        try:
-            for line in stream:
-                events.put(line)
-        finally:
-            events.put(None)
-
-    with TemporaryFile() as stdin, TemporaryFile() as stderr:
-        stdin.write(prompt.encode("utf-8"))
-        stdin.seek(0)
-        with subprocess.Popen(command, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr,
-                              text=True, cwd=directory, env=codex_environment()) as process:
-            threading.Thread(target=read_events, args=(process.stdout,), daemon=True).start()
-            last_progress = time.monotonic()
-            active = {}
-            failures = 0
-            try:
-                while True:
-                    now = time.monotonic()
-                    if active and now - min(active.values()) >= 300:
-                        raise ChatError("Codex 的一个步骤超过 5 分钟未完成。", 504)
-                    if not active and now - last_progress >= 180:
-                        raise ChatError("连续 3 分钟未收到 Codex 进展。", 504)
-                    try:
-                        line = events.get(timeout=1)
-                    except queue.Empty:
-                        continue
-                    if line is None:
-                        break
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    kind = event.get("type")
-                    item = event.get("item", {})
-                    if kind == "error":
-                        failures += 1
-                        if failures >= 5:
-                            raise ChatError("Codex 连续报告错误，本轮已结束。")
-                        progress("Codex 遇到连接或执行错误，正在等待恢复…")
-                    elif kind in ("item.started", "item.updated", "item.completed"):
-                        failures = 0
-                        last_progress = now
-                        item_id = item.get("id")
-                        if item_id and kind == "item.started":
-                            active.setdefault(item_id, now)
-                        elif item_id and kind == "item.completed":
-                            active.pop(item_id, None)
-                        if item.get("type") == "web_search" and kind != "item.completed":
-                            progress("正在搜索网页…")
-                        elif item.get("type") == "web_search":
-                            progress("已收到网页搜索结果，正在整理…")
-                        elif item.get("type") == "agent_message":
-                            progress("正在生成回复…")
-                    elif kind in ("thread.started", "turn.started", "turn.completed"):
-                        last_progress = now
-                process.wait(timeout=5)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-            stderr.seek(0)
-            return subprocess.CompletedProcess(command, process.returncode, stderr=stderr.read().decode(errors="replace"))
-
-
 def codex_chat(context, progress=None):
-    executable = shutil.which("codex")
-    if not executable:
-        raise ChatError("找不到 Codex CLI。安装并登录后再发送。", 503)
     permissions = context.get("permissions", DEFAULT_PERMISSIONS)
     search_mode = "live" if permissions["web_search"] else "disabled"
     prompt = (context["supervisor_instructions"] +
@@ -155,35 +80,15 @@ def codex_chat(context, progress=None):
               json.dumps(context["supervisor_skills"], ensure_ascii=False) +
               "\nAllowed operations and fields:\n" + json.dumps(allowed_operations(permissions),ensure_ascii=False) +
               "\nContext:\n" + json.dumps({key:value for key,value in context.items() if key not in ("supervisor_instructions", "supervisor_skills")},ensure_ascii=False))
-    with TemporaryDirectory(prefix="tripsci-chat-") as directory:
-        output = Path(directory) / "reply.json"
-        schema = Path(directory) / "schema.json"
-        schema.write_text(json.dumps(RESPONSE_SCHEMA),encoding="utf-8")
-        try:
-            command = [executable, "exec", "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
-                       "--skip-git-repo-check", "--ephemeral", "--disable", "shell_tool",
-                       "-c", f'web_search="{search_mode}"', "--cd", directory,
-                       "--output-schema", str(schema), "--output-last-message", str(output)]
-            if progress:
-                process = run_active_codex([*command, "--json", "-"], prompt, directory, progress)
-            else:
-                process = subprocess.run([*command, "-"], input=prompt, capture_output=True, text=True,
-                                         cwd=directory, timeout=90, env=codex_environment())
-        except subprocess.TimeoutExpired as exc:
-            raise ChatError("本轮达到执行时间上限。你可以重试或编辑原消息。", 504) from exc
-        except OSError as exc:
-            raise ChatError("无法启动 Codex CLI。", 503) from exc
-        if process.returncode or not output.is_file():
-            error = process.stderr.lower()
-            if "operation not permitted" in error:
-                raise ChatError("当前进程权限无法启动 Codex。请从本机终端启动 TripSci。", 503)
-            if "unauthorized" in error or "401" in error:
-                raise ChatError("Codex 未通过登录授权，请检查 codex login status。", 503)
-            raise ChatError("Codex 未返回回复。请检查登录和网络后重试。")
-        try:
-            return json.loads(output.read_text(encoding="utf-8"))
-        except ValueError as exc:
-            raise ChatError("Codex 返回了无效的主管回复。") from exc
+    try:
+        return run_json(context.get("supervisor_provider", "codex"), prompt, RESPONSE_SCHEMA, web_search=search_mode,
+                              timeout=90, progress=progress)
+    except ProviderError as exc:
+        messages = {
+            "missing_output": "Codex 未返回回复。请检查登录和网络后重试。",
+            "invalid_output": "Codex 返回了无效的主管回复。",
+        }
+        raise ChatError(messages.get(exc.kind, str(exc)), exc.status) from exc
 
 
 class MainChat:
@@ -369,6 +274,7 @@ class MainChat:
         supervisor = self.project.get(db, "agent", SUPERVISOR_ID)
         context = {"history": [{"role":m["role"],"text":m["text"][:4000]} for m in row["messages"][-16:]],
                    "message": text, "permissions": supervisor_permissions(supervisor),
+                   "supervisor_provider": supervisor["runtime"],
                    "supervisor_instructions": supervisor["instructions"],
                    "supervisor_skills": supervisor.get("skill_files", [])}
         context["workspace"] = {
