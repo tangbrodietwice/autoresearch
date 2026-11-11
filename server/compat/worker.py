@@ -1,15 +1,15 @@
 """Worker for legacy sample and benchmark plans."""
-from mock_training import MockTraining
-from research import planner
-from run_workspace import prepare
-from run_workspace import publish_result
-from scheduler import TaskManager
-from legacy.benchmarks import beans
+from compat.mock_training import MockTraining
+from compat import benchmark_policy as planner
+from run_artifacts import prepare
+from run_artifacts import publish_result
+from execution.scheduler import TaskManager
+from compat.benchmarks import beans
 from pathlib import Path
 import fcntl
-from legacy.benchmarks import iris
+from compat.benchmarks import iris
 import json
-from legacy.benchmarks import name_llm
+from compat.benchmarks import name_llm
 import re
 import subprocess
 import sys
@@ -18,7 +18,7 @@ import time
 BASE = Path(__file__).resolve().parent
 
 
-class ResearchWorker:
+class BenchmarkWorker:
     def __init__(self, project):
         self.p = project
         self.manager = TaskManager(project)
@@ -87,7 +87,7 @@ class ResearchWorker:
                     return
             if task.get("workspace"):
                 self.p.repo = self.p.root / "projects" / task["workspace"]
-                self.p.bootstrap()
+            self.p.bootstrap()
             adapter = task.get("environment",{}).get("adapter")
             real = adapter == "iris"
             bean = adapter == "beans"

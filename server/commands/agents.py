@@ -1,9 +1,9 @@
 """Workspace commands: agents."""
 from .common import uid
 from execution import runtimes
-from run_workspace import write_text
-from main_chat import DEFAULT_PERMISSIONS
-from main_chat import SUPERVISOR_ID
+from run_artifacts import write_text
+from agents.profiles import DEFAULT_PERMISSIONS
+from agents.profiles import SUPERVISOR_ID
 
 
 def agent_skills(self, db, d):
@@ -13,7 +13,8 @@ def agent_skills(self, db, d):
     agent = self.get(db, "agent", s("id", required=True))
     skills = d.get("skills")
     if agent.get("role") != "supervisor":
-        return self.action(db, {**agent, "op":"agent", "skills":skills})
+        return self.action(db, {**{k: agent[k] for k in ("id", "name", "runtime", "instructions")},
+                                "op": "agent", "skills": skills})
     catalog = {row["id"]:row for row in self.p.all(db, "skill")}
     if not isinstance(skills, list) or any(not isinstance(key, str) or key not in catalog for key in skills):
         raise ValueError("请选择工作区中已有的 Skill。")

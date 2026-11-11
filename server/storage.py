@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 
-from run_workspace import write_text
+from run_artifacts import write_text
 
 
 SEED = {"low_freq_auc": .65, "overall_auc": .72}
@@ -15,13 +15,11 @@ CONSTRAINTS = {"primary_metric": "low_freq_auc", "max_parallel_jobs": 1,
                "protected_paths": ["data/", "evaluation/"], "dataset": "synthetic-v1"}
 
 
-class Project:
+class WorkspaceStore:
     def __init__(self, root):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.repo = self.root / "project"
-        self.repo.mkdir(exist_ok=True)
-        self.bootstrap()
         with self.tx() as db:
             db.execute("CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, body TEXT, PRIMARY KEY(kind,id))")
             if not self.get(db, "settings", "active"):

@@ -130,6 +130,16 @@ class NativeAPI(unittest.TestCase):
         manual_settings = self.api("settings", **settings["payload"])
         self.assertEqual(self.api("confirm_supervisor", proposal_id=settings["id"]), manual_settings)
 
+    def test_supervisor_can_attach_draft_with_shared_workspace_command(self):
+        plan = self.api("plan", title="Draft", direction="Compare")
+        reply = self.api("message", text="fixture: propose attachment")
+        proposal = reply["messages"][-1]["proposal"]
+        self.assertEqual(proposal["payload"]["attach_plan"], plan["id"])
+        project = self.api("confirm_supervisor", proposal_id=proposal["id"])
+        state = self.api()
+        attached = next(row for row in state["plan"] if row["id"] == plan["id"])
+        self.assertEqual(attached["workspace"], project["id"])
+
     def test_legacy_supervisor_permissions_migrate(self):
         supervisor = self.api()["agent"][0]
         permissions = {**supervisor["permissions"], "web_search": False}

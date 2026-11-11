@@ -1,6 +1,7 @@
 """Deterministic research scheduling and training recovery."""
-from mock_training import MockTraining
-from run_workspace import attempt_dir
+from compat.mock_training import MockTraining
+from run_artifacts import attempt_dir
+from research.project_runner import valid_metrics
 from execution.attempts import append_attempt
 from execution.local_process import TRAINING_TIMEOUT
 from storage import CONSTRAINTS
@@ -12,17 +13,20 @@ import time
 import uuid
 
 
+PROCESS_ADAPTERS = {"beans", "name-llm", "local-project"}
+
+
 class TaskManager:
     def __init__(self, project):
         self.p = project
 
-    def create(self, db, goal, budget, cap=10):
+    def create(self, db, goal, budget, cap=10, *, constraints=None, baseline=None):
         if not isinstance(goal, str) or not goal.strip() or len(goal)>500 or type(budget) is not int or not 1<=budget<=cap:
             raise ValueError("Provide a goal and a valid experiment budget.")
         key = uuid.uuid4().hex[:12]
         task = {"id": key, "goal": goal.strip(), "max_experiments": budget,
-                "constraints": dict(CONSTRAINTS), "settings": self.p.get(db, "settings", "active"),
-                "status": "ready", "round": 0, "best": SEED, "pending_job": None, "phase": "scheduled"}
+                "constraints": dict(CONSTRAINTS if constraints is None else constraints), "settings": self.p.get(db, "settings", "active"),
+                "status": "ready", "round": 0, "best": dict(SEED if baseline is None else baseline), "pending_job": None, "phase": "scheduled"}
         self.save(db, task, "Task contract approved")
         return key
 
@@ -56,14 +60,14 @@ class TaskManager:
             attempt["detail"] = detail
         count = len(job["attempts"]) - job.get("retry_from", 0)
         terminal = count >= self.max_training_attempts
-        if terminal:
+        if terminal and task["status"] != "paused":
             reason = {"training_error":"训练返回错误","invalid_receipt":"结果文件无效",
                       "missing_receipt":"训练退出但未写入结果","timeout":"训练超时",
                       "launch_failed":"无法启动训练进程"}[code]
             task.update(status="failed", phase="failed", failure_stage="training",
                         failure=f"本机训练失败：{reason}（已尝试 {count} 次）",
                         failure_info=dict(attempt))
-        else:
+        elif not terminal:
             job["retry_at"] = now + self.training_retry_delay * 2**(count-1)
             task["phase"] = "training_retry"
         self.p.put(db, "job", job["id"], job)
@@ -71,7 +75,7 @@ class TaskManager:
 
     def training_result(self, db, task, job, runtime, now, launches):
         attempts = job.setdefault("attempts", [])
-        if not attempts and "retry_from" not in job:
+        if not attempts and "retry_from" not in job and job["adapter"] != "local-project":
             attempts.append({"number":0,"state":"running","started_at":now})
         attempt = attempts[-1] if attempts else None
         if attempt and attempt["state"] == "dispatch_pending":
@@ -97,9 +101,14 @@ class TaskManager:
                         self.training_failure(db,task,job,attempt,"training_error",now,str(payload["error"])[:80])
                         return None
                     metrics = payload["metrics"]
-                    keys = {task["constraints"]["primary_metric"], task["constraints"]["guardrail_metric"]}
-                    if not all(type(metrics[k]) in (int,float) and math.isfinite(metrics[k]) and 0<=metrics[k]<=1 for k in keys):
-                        raise ValueError("Invalid metric")
+                    primary = task["constraints"]["primary_metric"]
+                    if job.get("adapter") == "local-project":
+                        if not valid_metrics(metrics, primary):
+                            raise ValueError("Invalid metrics")
+                    else:
+                        keys = {primary, task["constraints"]["guardrail_metric"]}
+                        if not all(type(metrics[k]) in (int,float) and math.isfinite(metrics[k]) and 0<=metrics[k]<=1 for k in keys):
+                            raise ValueError("Invalid metric")
                     started, ended = payload["started_at"],payload["ended_at"]
                     if not all(type(v) in (int,float) and math.isfinite(v) for v in (started,ended)) or started>ended:
                         raise ValueError("Invalid timing")
@@ -117,11 +126,11 @@ class TaskManager:
             if exit_code is not None:
                 self.training_failure(db,task,job,attempt,"missing_receipt",now,exit_code)
                 return None
-            if now-attempt["started_at"] >= self.training_timeout:
+            locked = runtime.attempt_lock_held(directory)
+            if job.get("adapter") != "local-project" and now-attempt["started_at"] >= self.training_timeout:
                 runtime.stop_training(job["id"],number)
                 self.training_failure(db,task,job,attempt,"timeout",now)
                 return None
-            locked = runtime.attempt_lock_held(directory)
             if number != 0:
                 if not locked and not runtime.owns_training(job["id"],number) and now-attempt["started_at"] >= 2:
                     self.training_failure(db,task,job,attempt,"missing_receipt",now)
@@ -131,6 +140,11 @@ class TaskManager:
                 return None
             # Old jobs had no durable launch record. Reuse a receipt or a held lock if present.
             attempts.pop()
+        if (attempt and attempt["state"] == "failed"
+                and len(attempts) - job.get("retry_from", 0) >= self.max_training_attempts
+                and task["status"] == "waiting"):
+            self.training_failure(db, task, job, attempt, attempt["error_code"], now)
+            return None
         if task["status"] != "waiting" or now < job.get("retry_at",0):
             return None
         attempt = append_attempt(job, "dispatch_pending", requested_at=now)
@@ -150,7 +164,7 @@ class TaskManager:
                     job = self.p.get(db, "job", task["pending_job"])
                     result = job.get("result")
                     if result is None:
-                        if job.get("adapter") in ("beans","name-llm"):
+                        if job.get("adapter") in PROCESS_ADAPTERS:
                             result = self.training_result(db,task,job,runtime,now,launches)
                         else:
                             result = MockTraining.poll(job,now)
@@ -170,6 +184,18 @@ class TaskManager:
                 if (task["status"] != "waiting" or task["pending_job"] != job_id
                         or attempt["number"] != number or attempt["state"] != "dispatch_pending"):
                     continue
+                slots = (self.p.get(db, "settings", "active") or {}).get("slots", 2)
+                occupied = sum(
+                    other.get("adapter") in PROCESS_ADAPTERS
+                    and "result" not in other and other.get("attempts")
+                    and other["attempts"][-1]["state"] == "running"
+                    for other in self.p.all(db, "job") if other.get("attempts")
+                )
+                if occupied >= slots:
+                    if task["phase"] != "queued":
+                        task["phase"] = "queued"
+                        self.save(db, task, "Waiting for a training slot")
+                    continue
                 try:
                     runtime.launch_training(workspace,job_id,adapter,number)
                 except OSError as exc:
@@ -177,6 +203,8 @@ class TaskManager:
                 else:
                     attempt.update(state="running",started_at=time.time())
                     self.p.put(db,"job",job_id,job)
+                    task["phase"] = "training"
+                    self.save(db, task, "Training attempt started")
         for _, key in sorted(ready):
             try:
                 with self.p.tx() as db:

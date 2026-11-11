@@ -24,7 +24,7 @@ def run_dir(root, job_id):
 
 def attempt_dir(root, job_id, number):
     directory = run_dir(root, job_id)
-    if (directory / "run.json").is_file():
+    if (directory / "run.json").is_file() or (directory / "inputs.json").is_file():
         return directory / "attempts" / str(number)
     legacy = root / "training" / job_id
     return legacy / f"attempt-{number}" if number else legacy

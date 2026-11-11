@@ -1,16 +1,17 @@
 """Launch local Workers and train immutable candidate configurations."""
 import argparse
+import os
+from contextlib import nullcontext
 import fcntl
-import hashlib
-import json
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from legacy.benchmarks import beans
-from run_workspace import attempt_dir, run_dir
+from run_artifacts import attempt_dir, write_json
+from storage import WorkspaceStore
+from research.project_runner import clone, evaluate
 
 TRAINING_TIMEOUT = 120
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -26,10 +27,17 @@ class LocalProcessRunner:
         self.training = {key:proc for key,proc in self.training.items() if proc.poll() is None}
         directory = attempt_dir(self.root,job_id,number)
         directory.mkdir(parents=True,exist_ok=True)
-        with (directory/"worker.log").open("ab") as log:
-            self.training[job_id,number] = subprocess.Popen(
-                [sys.executable,"-m","execution.local_process",str(self.root),workspace,job_id,adapter,str(number)],
-                stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,cwd=BACKEND_DIR)
+        # Keep the lease across the Popen/SQLite commit gap, including server restarts.
+        with (directory / "lock").open("ab") as lock, (directory / "worker.log").open("ab") as log:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # A previous scheduler already launched this attempt.
+            fd = lock.fileno()
+            self.training[job_id, number] = subprocess.Popen(
+                [sys.executable, "-m", "execution.local_process", str(self.root), workspace, job_id, adapter,
+                 str(number), "--lock-fd", str(fd)], pass_fds=(fd,),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, cwd=BACKEND_DIR)
 
     def owns_training(self, job_id, number):
         return (job_id,number) in self.training
@@ -42,7 +50,7 @@ class LocalProcessRunner:
         proc = self.training.get((job_id,number))
         if proc and proc.poll() is None:
             try:
-                proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
@@ -83,54 +91,42 @@ class LocalProcessRunner:
                        check=True, timeout=30)
 
 
-def run_training_attempt(root, workspace, job_id, adapter="beans", number=0):
+def run_training_attempt(root, workspace, job_id, adapter="beans", number=0, lock_fd=None):
     job = attempt_dir(root,job_id,number)
     job.mkdir(parents=True,exist_ok=True)
     receipt = job/"result.json"
-    with (job/"lock").open("a") as lock:
-        try:
-            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:
-            return
+    with (job / "lock").open("a") if lock_fd is None else nullcontext() as lock:
+        if lock_fd is None:
+            lock_fd = lock.fileno()
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
         if receipt.exists():
             return
         started=time.time()
         try:
-            repo=root/"projects"/workspace
-            directory=run_dir(root,job_id)
-            metadata=directory/"run.json"
-            if metadata.is_file():
-                run=json.loads(metadata.read_text())
-                if (run["job"],run["project"],run["adapter"]) != (job_id,workspace,adapter):
-                    raise ValueError("Run metadata does not match the dispatched job")
-                candidate_text=(directory/run["candidate"]).read_text()
-                if hashlib.sha256(candidate_text.encode()).hexdigest()!=run["candidate_sha256"]:
-                    raise ValueError("Candidate hash does not match the run configuration")
-                candidate=json.loads(candidate_text)
-                manifest=json.loads((directory/"protocol.json").read_text())["dataset_manifest"]
+            if adapter == "local-project":
+                store = WorkspaceStore(root)
+                with store.tx(readonly=True) as db:
+                    row = store.get(db, "job", job_id)
+                if not row or row["workspace"] != workspace or row["adapter"] != adapter:
+                    raise ValueError("Configured job does not match the dispatched attempt")
+                env, candidate = row["environment"], row["candidate"]
+                candidate_tree, evaluation_tree = job / "candidate", job / "evaluation"
+                clone(candidate["checkout"], candidate_tree, candidate["revision"])
+                clone(env["repo"], evaluation_tree, env["source_revision"])
+                result = evaluate(env, candidate_tree, job, evaluation_tree, lock_fd=lock_fd)
             else:
-                candidate=json.loads((repo/"models"/f"{job_id}.json").read_text())
-                manifest=None
-            if adapter=="name-llm":
-                from legacy.benchmarks import name_llm
-                if manifest is None:
-                    manifest=json.loads((repo/"evaluation/name-llm-protocol.json").read_text())
-                diagnostics = {}
-                result=name_llm.evaluate(root,manifest,candidate,diagnostics=diagnostics)
-            else:
-                data=beans.dataset(str(repo/"data"/"dry-bean.csv.gz"))
-                if manifest and data["sha256"]!=manifest["sha256"]:
-                    raise ValueError("Dataset hash does not match the run protocol")
-                result=beans.evaluate(data,candidate)
+                from compat.training import evaluate_benchmark
+                result, diagnostics = evaluate_benchmark(root, workspace, job_id, adapter)
             payload={"metrics":result,"started_at":started,"ended_at":time.time()}
             if adapter == "name-llm":
                 payload["diagnostics"] = diagnostics
         except Exception as exc:
             print(type(exc).__name__,flush=True)
             payload={"error":type(exc).__name__,"started_at":started,"ended_at":time.time()}
-        temp=receipt.with_suffix(".tmp")
-        temp.write_text(json.dumps(payload),encoding="utf-8")
-        temp.replace(receipt)
+        write_json(receipt, payload)
 
 
 if __name__=="__main__":
@@ -138,8 +134,10 @@ if __name__=="__main__":
     parser.add_argument("root",type=Path)
     parser.add_argument("workspace")
     parser.add_argument("job")
-    parser.add_argument("adapter",choices=("beans","name-llm"),nargs="?",default="beans")
+    parser.add_argument("adapter",choices=("beans","name-llm","local-project"),nargs="?",default="beans")
     parser.add_argument("number",type=int,nargs="?",default=0)
-    args=parser.parse_args()
-    signal.alarm(TRAINING_TIMEOUT)
-    run_training_attempt(args.root,args.workspace,args.job,args.adapter,args.number)
+    parser.add_argument("--lock-fd", type=int)
+    args = parser.parse_args()
+    if args.adapter != "local-project":
+        signal.alarm(TRAINING_TIMEOUT)
+    run_training_attempt(args.root, args.workspace, args.job, args.adapter, args.number, args.lock_fd)

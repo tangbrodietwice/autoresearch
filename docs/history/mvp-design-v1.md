@@ -1,3 +1,5 @@
+> 历史设计草案。当前目录、接口和运行方式见[架构说明](../architecture.md)。
+
 # Autoresearch Agent MVP：详细设计与开发规格（V1.0）
 
 > 状态：开发交接稿（待最终审阅）  

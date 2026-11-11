@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PYTHONPATH="$PWD/tripsci" python3 -m unittest discover -s tests/backend -v
+PYTHONPATH="$PWD/server" python3 -m unittest discover -s tests/backend -v
 scripts/build-macos.sh
 test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT

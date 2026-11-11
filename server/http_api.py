@@ -1,14 +1,14 @@
 """Local HTTP service and workspace API."""
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
-from main_chat import ChatError
-from main_chat import MainChat
-from main_chat import codex_chat
-from workspace_api import WorkspaceAPI
-from run_workspace import recover_results
+from agents.supervisor import ChatError
+from agents.supervisor import MainChat
+from agents.supervisor import codex_chat
+from workspace import WorkspaceAPI
+from run_artifacts import recover_results
 from execution.local_process import LocalProcessRunner
-from scheduler import TaskManager
-from storage import CONSTRAINTS
+from execution.scheduler import TaskManager
+import fcntl
 import hashlib
 import json
 import re
@@ -18,6 +18,15 @@ import time
 
 
 def serve(project, port, chat_model=codex_chat):
+    with (project.root / "server.lock").open("ab") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("This workspace already has a running TripSci server.") from exc
+        _serve(project, port, chat_model)
+
+
+def _serve(project, port, chat_model):
     recover_results(project)
     manager = TaskManager(project)
     chat = MainChat(project, chat_model)
@@ -47,13 +56,7 @@ def serve(project, port, chat_model=codex_chat):
                 with project.tx(readonly=True) as db:
                     state = workspace.state(db)
                 return self.send(state)
-            if self.path != "/api/state":
-                return self.send({"error": "Not found"}, 404)
-            with project.tx(readonly=True) as db:
-                state = {k: project.all(db, k) for k in ("task", "experiment", "chat", "progress", "inbox")}
-                state["settings"] = project.get(db, "settings", "active")
-            state["knowledge"] = {"protocol": CONSTRAINTS, "history": json.loads((project.repo/"history.json").read_text())}
-            self.send(state)
+            return self.send({"error": "Not found"}, 404)
 
         def do_POST(self):
             if self.headers.get_content_type() != "application/json":
@@ -71,8 +74,6 @@ def serve(project, port, chat_model=codex_chat):
                     return self.send(chat.reply(request))
                 if self.path == "/v1/action" and request.get("op") == "chat_status":
                     return self.send(chat.background_turn(request))
-                if self.path == "/api/chat" and request.get("action", "chat") == "chat":
-                    return self.send(chat.reply(request, legacy=True))
                 if self.path in ("/api/chat", "/api/settings"):
                     return self.send({"error": "此旧版写入接口已停用。请通过 /v1/action 提交工作区操作。"}, 410)
                 with project.tx() as db:

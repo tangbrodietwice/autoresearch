@@ -1,12 +1,9 @@
-"""TripSci service and worker entrypoint; preserves legacy imports."""
+"""Launch the TripSci service or advance one research task."""
 import argparse
 from pathlib import Path
 
-from mock_training import MockTraining
-from execution.local_process import LocalProcessRunner
-from scheduler import TaskManager
-from server import serve
-from storage import Project
+from http_api import serve
+from storage import WorkspaceStore
 from worker_entrypoint import ResearchWorker
 
 BASE = Path(__file__).resolve().parent
@@ -18,7 +15,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--worker")
     args = parser.parse_args()
-    project = Project(args.state)
+    project = WorkspaceStore(args.state)
     if args.worker:
         ResearchWorker(project).run(args.worker)
     else:

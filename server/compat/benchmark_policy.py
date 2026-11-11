@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 from execution import ProviderError, run_json
 
-from run_workspace import write_json
+from run_artifacts import write_json
 
 SKILL = Path(__file__).resolve().parents[1] / "skills/scientific-research/SKILL.md"
 

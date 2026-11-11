@@ -5,9 +5,9 @@ from .common import uid
 from pathlib import Path
 from urllib.parse import urlparse
 from research.project_runner import project_config
-from legacy.benchmarks import beans
-from legacy.benchmarks import iris
-from legacy.benchmarks import name_llm
+from compat.benchmarks import beans
+from compat.benchmarks import iris
+from compat.benchmarks import name_llm
 import re
 
 

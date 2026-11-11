@@ -78,3 +78,15 @@ Chromium 通过：无项目引导、从项目列表进入看板、从项目创�
 - A standalone live Codex probe edited a disposable candidate file. A full live
   two-round run was not executed: the host approval gate rejected executing
   unreviewed model-generated code with host-user permissions.
+
+## Server layout and shared dispatch
+
+- `scripts/check.sh` covers the pause race, configured and benchmark jobs
+  sharing a slot, a fresh scheduler observing a live attempt, legacy receipt
+  recovery, analysis retry without retraining, and the shared proposal fields.
+- The configured project regression runs real training and fixed evaluation
+  commands on macOS with fixture model responses. The candidate cannot read or
+  change a host-only test file, and does not inherit the test environment.
+- The packaged macOS smoke exercises the bundled server and two mock
+  experiments without a model login. Supervisor model contracts are covered
+  by the fixture HTTP suite.

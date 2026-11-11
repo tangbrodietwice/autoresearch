@@ -9,7 +9,12 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from app import MockTraining, Project, ResearchWorker, LocalProcessRunner, TaskManager
+from compat.mock_training import MockTraining
+from compat.worker import BenchmarkWorker
+from execution.local_process import LocalProcessRunner
+from execution.scheduler import TaskManager
+from storage import WorkspaceStore
+from worker_entrypoint import ResearchWorker
 
 ROOT = Path(__file__).resolve().parent
 
@@ -21,8 +26,8 @@ class ResearchTest(unittest.TestCase):
         self.root = Path(temp.name)
 
     def test_worker_failure_stops_until_retry(self):
-        from workspace_api import WorkspaceAPI
-        p = Project(self.root)
+        from workspace import WorkspaceAPI
+        p = WorkspaceStore(self.root)
         manager = TaskManager(p)
         api = WorkspaceAPI(p, manager)
 
@@ -48,7 +53,8 @@ class ResearchTest(unittest.TestCase):
             self.assertNotIn("failure", task)
 
     def test_rollback_recovers_revision_after_other_plan_advances_head(self):
-        project = Project(self.root)
+        project = WorkspaceStore(self.root)
+        project.bootstrap()
         worker = ResearchWorker(project)
         with project.tx() as db:
             first = worker.manager.create(db,"first plan",1)
@@ -68,7 +74,8 @@ class ResearchTest(unittest.TestCase):
         self.assertEqual(project.git("diff","--cached","--name-only"),"unrelated.txt")
 
     def test_report_commit_recovers_after_database_rollback(self):
-        project = Project(self.root)
+        project = WorkspaceStore(self.root)
+        project.bootstrap()
         worker = ResearchWorker(project)
         with project.tx() as db:
             first = worker.manager.create(db,"first plan",1)
@@ -100,7 +107,7 @@ class ResearchTest(unittest.TestCase):
             record = project.get(db,"experiment",first+"-1")
         self.assertEqual(record["report_commit"],revision)
         self.assertIn(record["revision"],project.git("show",revision+":"+record["report"]))
-        from run_workspace import recover_results
+        from run_artifacts import recover_results
         directory = self.root / record["run_path"]
         (directory / "result.json").unlink()
         (directory / "report.md").unlink()
@@ -109,8 +116,8 @@ class ResearchTest(unittest.TestCase):
         self.assertIn(record["revision"], (directory / "report.md").read_text())
 
     def test_training_attempt_failures_are_isolated_and_bounded(self):
-        from run_workspace import attempt_dir
-        project = Project(self.root)
+        from run_artifacts import attempt_dir
+        project = WorkspaceStore(self.root)
         manager = TaskManager(project)
         manager.training_retry_delay = 0
         manager.training_timeout = .1
@@ -154,8 +161,9 @@ class ResearchTest(unittest.TestCase):
         self.assertTrue((attempt_dir(self.root,"broken-1",2)/"result.json").exists())
 
     def test_research_uses_history_and_records_agent_analysis(self):
-        from research import planner
-        project = Project(self.root)
+        from compat import benchmark_policy as planner
+        project = WorkspaceStore(self.root)
+        project.bootstrap()
         worker = ResearchWorker(project)
         with project.tx() as db:
             key = worker.manager.create(db,"Study smoothing",2)
@@ -204,7 +212,7 @@ class ResearchTest(unittest.TestCase):
             planner.validate(invalid,seen[1])
 
     def test_paused_task_defers_pending_dispatch_and_reuses_attempt(self):
-        project = Project(self.root)
+        project = WorkspaceStore(self.root)
         manager = TaskManager(project)
         launched = []
 
@@ -232,9 +240,10 @@ class ResearchTest(unittest.TestCase):
 
     def test_candidate_paths_reject_protected_files_and_symlink_escape(self):
         from storage import CONSTRAINTS
-        project = Project(self.root)
+        project = WorkspaceStore(self.root)
         outside = self.root / "outside"
         outside.mkdir()
+        project.repo.mkdir(exist_ok=True)
         (project.repo / "models").symlink_to(outside, target_is_directory=True)
         for path in ("models/run.py", "models/../outside.py", "evaluation/protocol.json"):
             with self.assertRaises(ValueError):
@@ -242,7 +251,7 @@ class ResearchTest(unittest.TestCase):
         self.assertFalse(any(outside.iterdir()))
 
     def test_contract_and_mock(self):
-        p = Project(self.root)
+        p = WorkspaceStore(self.root)
         with p.tx() as db:
             for budget in [0, 11, True, '3']:
                 with self.assertRaises(ValueError):
@@ -250,11 +259,11 @@ class ResearchTest(unittest.TestCase):
         job = MockTraining.submit('job', 'revision', .5, 1)
         self.assertIsNone(MockTraining.poll(job, job['ready_at']-.1))
         self.assertEqual(MockTraining.poll(job, job['ready_at']), MockTraining.poll(job, job['ready_at']+10))
-        self.assertNotEqual(ResearchWorker.propose({'strength': .2}, [.2,.5], False),
-                            ResearchWorker.propose({'strength': .5}, [.2,.5], False))
+        self.assertNotEqual(BenchmarkWorker.propose({'strength': .2}, [.2,.5], False),
+                            BenchmarkWorker.propose({'strength': .5}, [.2,.5], False))
 
     def test_worker_and_repository(self):
-        p = Project(self.root)
+        p = WorkspaceStore(self.root)
         m = TaskManager(p)
         with p.tx() as db:
             p.put(db,'settings','active',{'runtime':'local-process','skills':['adaptive-ctr','wide-search'],'delay':.1})

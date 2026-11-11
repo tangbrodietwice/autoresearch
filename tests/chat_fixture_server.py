@@ -4,8 +4,9 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tripsci"))
-from app import Project, serve
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+from http_api import serve
+from storage import WorkspaceStore
 
 
 def model(context):
@@ -31,6 +32,11 @@ def model(context):
     if context["message"] == "fixture: invalid project":
         return {"reply":"待确认项目配置","proposal":{"operation":"workspace","payload_json":json.dumps({
             "name":"无效项目","mode":"local"})}}
+    if context["message"] == "fixture: propose attachment":
+        plan = context["workspace"]["plans"][-1]
+        return {"reply":"待确认项目和关联","proposal":{"operation":"workspace","payload_json":json.dumps({
+            "name":"关联后的项目","repo":"fixture/research","baseline":"v1","dataset":"synthetic-v1",
+            "train":"train.py","evaluate":"evaluate.py","mode":"local","floor":.715,"attach_plan":plan["id"]})}}
     if context["message"] == "fixture: propose project":
         return {"reply":"待确认项目配置","proposal":{"operation":"workspace","payload_json":json.dumps({
             "name":"主管提案项目","repo":"fixture/research","baseline":"v1","dataset":"synthetic-v1",
@@ -49,4 +55,4 @@ if __name__ == "__main__":
     parser.add_argument("--state",type=Path,required=True)
     parser.add_argument("--port",type=int,default=0)
     args=parser.parse_args()
-    serve(Project(args.state),args.port,chat_model=model)
+    serve(WorkspaceStore(args.state),args.port,chat_model=model)

@@ -4,7 +4,7 @@
 
 Run `scripts/run-web.sh` and open **http://127.0.0.1:8766/**. Python 3.10+ and Git are required. The script launches both the HTML server and the research service; stop it with Ctrl+C. Web state persists in `.state/web`; override with `TRIPSCI_STATE`. To avoid port collisions set `TRIPSCI_WEB_PORT` and `TRIPSCI_API_PORT`.
 
-The UI uses the versioned JSON API for all work. No browser-local mock state is used. Start with the sample CTR project or create an unassigned research draft, then associate a project and confirm the experiment contract. The native client remains a secondary client; use `TRIPSCI_URL` to point it at an already running backend rather than launching another scheduler against the same state.
+The UI uses the versioned JSON API for all work. No browser-local mock state is used. Create a project or start with an unassigned research draft, then associate a project and confirm the experiment contract. The native client remains a secondary client; use `TRIPSCI_URL` to point it at an already running backend rather than launching another scheduler against the same state.
 
 Validation: `python3 tests/web_smoke.py` exercises the Web origin and real backend. `node tests/ui.cjs` runs the browser flow where Playwright and Chromium are installed.
 
@@ -14,7 +14,7 @@ Validation: `python3 tests/web_smoke.py` exercises the Web origin and real backe
 - **项目**：通过「新建项目」填写代码、数据、训练和评测配置。
 - **研究计划**：可以先讨论并保存草稿；确定要开始实验时才关联项目、选择执行智能体和确认预算。
 - **工具**：可以登记链接、命令参考和 Markdown Skill。命令参考只记录，不执行。
-- **智能体**：自动识别本机 Codex 和 Claude Code 等受支持的运行时。可分别配置 AGENTS.md 和 Skills。外部运行时暂不可执行；内置 Worker 支持模拟实验及通过脚本导入的本机基准任务。自定义 Markdown 和 Skill 会保存和快照，目前只有内置规则影响实验策略。
+- **智能体**：可配置 Worker 指令和 Skills。Codex 支持通用本机研究；其他 CLI 目前仅检测。内置规则 Worker 用于模拟实验和基准任务。
 
 ### 项目指标趋势
 
@@ -51,16 +51,14 @@ python3 scripts/run-name-llm.py --url http://127.0.0.1:8776 --output /tmp/tripsc
 
 Web 默认状态保存在 `.state/web`。可用 `--state` 指定其他状态目录，`--output` 指定独立的导出位置。SQLite 仍是运行状态的来源，导出是按需生成的快照。
 
-### 单轮运行目录
+### 源码从哪里读
 
-想读代码，可以沿着一次「启动研究计划」往下看：
+1. [app.py](server/app.py) 启动服务；[http_api.py](server/http_api.py) 接收请求，[commands/](server/commands/) 定义 UI 和主管共同使用的工作区操作。
+2. [agents/supervisor.py](server/agents/supervisor.py) 负责对话与提案，[agents/worker.py](server/agents/worker.py) 负责实验提案与分析。
+3. [research/workflow.py](server/research/workflow.py) 推进通用研究计划，[execution/scheduler.py](server/execution/scheduler.py) 派发和恢复训练尝试。
+4. [storage.py](server/storage.py) 管理 SQLite 和 Git，[run_artifacts.py](server/run_artifacts.py) 管理运行文件。基准兼容代码在 [compat/](server/compat/)。
 
-1. [app.py](tripsci/app.py) 启动服务，[server.py](tripsci/server.py) 接收 HTTP 请求，[workspace_api.py](tripsci/workspace_api.py) 将工作台操作交给 [actions/plans.py](tripsci/actions/plans.py)。
-2. [scheduler.py](tripsci/scheduler.py) 决定何时派发任务，[local_process.py](tripsci/execution/local_process.py) 启动本机子进程。
-3. [worker_entrypoint.py](tripsci/worker_entrypoint.py) 选择执行路径。通用 ML 项目读 [research/local_worker.py](tripsci/research/local_worker.py)，内置实验读 [legacy/worker.py](tripsci/legacy/worker.py)。
-4. [storage.py](tripsci/storage.py) 管理 SQLite 和 Git，[run_workspace.py](tripsci/run_workspace.py) 管理运行目录和文件。
-
-业务关系是项目（`workspace`）→ 研究计划（`plan`）→ 执行任务（`task`）→ 多轮实验（`experiment`）。Worker 配置在计划启动时快照到任务。更多分工见 [架构说明](docs/architecture.md)。
+业务链路是项目 → 研究计划 → 实验 → 训练尝试。Worker 配置在计划启动时冻结；每次模型调用记录所用配置版本。详见 [架构说明](docs/architecture.md)。
 
 新提交的实验会在状态目录下生成 `runs/<job-id>/`，包含运行清单、候选代码或参数、评测协议、完成后的报告和结果。有关联智能体时还会记录启动时的 `AGENTS.md` 和已绑定的自定义 `skills/<id>/SKILL.md`。本机独立训练进程的回执和日志按尝试号存放于 `attempts/`。旧实验仍可通过原有 Git 工作区查看。
 
@@ -74,7 +72,7 @@ Codex 决策在独立进程运行，训练等待时不调用模型。每轮保�
 
 ### TripSci 研发主管
 
-工作区聊天和研究计划对话由本机已登录的 Codex CLI 执行。主管的角色指令在 `tripsci/agents/supervisor/AGENTS.md`。对话历史及相关项目和实验摘要会传入模型。主管可以提出项目配置、研究计划、委派、反馈及 Skill 等变更，页面展示操作内容，经确认后由服务端校验并执行。模型超时或启动失败时，界面显示错误并保留输入供重试。
+工作区聊天和研究计划对话由本机已登录的 Codex CLI 执行。主管的角色指令在 `server/agents/supervisor.md`。对话历史及相关项目和实验摘要会传入模型。主管可以提出项目配置、研究计划、委派、反馈及 Skill 等变更，页面展示操作内容，经确认后由服务端校验并执行。模型超时或启动失败时，界面显示错误并保留输入供重试。
 
 ## 通用本机研究项目
 
@@ -83,8 +81,8 @@ Web 工作台默认创建通用项目。先准备一个本机 Git 仓库并提�
 - 训练命令从候选 Git 副本运行；评测命令从计划锁定的基线 Git 副本运行。
 - 两个命令接收 `TRIPSCI_DATASET`、`TRIPSCI_SEED`、`TRIPSCI_RUN_DIR` 和 `TRIPSCI_CANDIDATE_DIR`。用运行目录传递模型或预测文件。
 - 评测命令把指标写到 `TRIPSCI_METRICS_PATH`，格式是 JSON 对象，例如 `{"rmse": 4.2}`。指标可以超出 0–1。请确保项目命令实际使用随机种子，并将依赖和切分协议纳入项目版本管理。
-- Worker 在独立副本内决定并实现代码改动，TripSci 运行配置的命令并保存输入指纹、日志、指标和分析。评测代码从固定版本读取；普通本机训练命令不是安全隔离环境，仅用于信任的项目。
+- Worker 在独立副本内决定并实现代码改动，TripSci 运行配置的命令并保存输入指纹、日志、指标和分析。在 macOS 上，训练和评测使用不同的隔离权限。训练可写候选目录和模型产物，评测从固定版本运行并写指标；两者不继承服务的环境变量，也不能联网。没有可用隔离器时，通用训练会失败。依赖需预先安装在隔离器允许读取的系统或工具目录中。
 - 暂停阻止开始下一轮；当前已经启动的命令可以结束。旧 benchmark 仍可通过兼容路径读取和运行。本轮未启用真实远程训练。
 
-源码入口：`apps/web/`、`apps/macos/`、`tripsci/`；旧任务资源在
-`tripsci/legacy/benchmarks/`。工作区数据路径保持原样。
+源码入口：`apps/web/`、`apps/macos/`、`server/`；旧任务资源在
+`server/compat/benchmarks/`。工作区数据路径保持原样。

@@ -270,14 +270,14 @@ function metrics(r){return Object.entries(r||{}).map(([k,v])=>E(metricNames[k]||
 const configLabel=e=>e.adapter==='local-project'?(e.research_proposal?.hypothesis||'项目候选代码'):e.adapter==='name-llm'&&e.config?(e.config.classifier==='multinomial_nb'?'多项式朴素贝叶斯':'余弦质心')+' · 词频 '+e.config.word+' · 字符 '+e.config.char+' · 文体 '+e.config.style+' · '+e.config.grams+'-gram':e.config?(e.config.family==='centroid'?'最近质心':'高斯朴素贝叶斯')+' · 先验权重 '+Number(e.config.prior).toFixed(2)+(e.config.shrinkage!=null?' · 方差收缩 '+Number(e.config.shrinkage).toFixed(2):''):e.k?'k = '+e.k+' · '+(e.scale?'按特征范围缩放':'原始特征'):'平滑强度 '+e.strength;
 const shortScore=(e,k)=>Number.isFinite(e.result?.[k])?(metricNames[k]||k)+' '+e.result[k].toFixed(4):'暂无指标';
 const delta=e=>Number.isFinite(e.baseline_delta)?' · 较基线 '+(e.baseline_delta>=0?'+':'')+e.baseline_delta.toFixed(4):'';
-const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',research_decision:'Codex 正在检索历史并作出研究决策',finished:'实验已结束'};
+const phases={scheduled:'等待调度',queued:'等待训练名额',preparing:'编写实验代码',submitting:'提交训练任务',waiting:'等待训练结果',training:'本机训练与评测',analyzing:'分析实验结果',cooldown:'等待下一轮窗口',training_retry:'等待重试训练',research_decision:'Codex 正在检索历史并作出研究决策',finished:'实验已结束'};
 function workerStage(t,job){
  if(t.status==='paused')return '暂停后续调度';
  if(t.status==='failed')return '执行失败';
  if(t.status==='completed')return phases.finished;
  if(t.phase==='research_decision')return phases.research_decision;
- if(t.phase==='training_retry')return phases.training_retry;
- if(job)return job.result?'分析实验结果':['beans','name-llm'].includes(job.adapter)?'本机训练或等待结果':phases.waiting;
+ if(['queued','training','training_retry'].includes(t.phase))return phases[t.phase];
+ if(job)return job.result?phases.analyzing:phases.waiting;
  return phases[t.phase]||'等待调度';
 }
 function analyzeRun(e,t){

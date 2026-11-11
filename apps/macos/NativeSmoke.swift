@@ -14,8 +14,7 @@ import Foundation
     do {
         try require(api.connected,api.error)
         _ = try await post("settings",["slots":1,"delay":0.3])
-        let chat = try await post("message",["text":"原生客户端测试"])
-        let plan = try await post("plan",["title":"Swift smoke","direction":"CTR","source":str(chat,"id")])
+        let plan = try await post("plan",["title":"Swift smoke","direction":"CTR"])
         let project = try await post("workspace",["name":"Smoke","repo":"mock","baseline":"v1","dataset":"synthetic-v1",
                                                   "train":"mock","evaluate":"mock","mode":"local","floor":0.715])
         let id=str(plan,"id")

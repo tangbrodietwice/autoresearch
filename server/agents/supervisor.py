@@ -4,50 +4,17 @@ import hashlib
 import json
 import re
 import threading
-import time
 import uuid
-from pathlib import Path
 from execution import ProviderError, run_json
+from commands import OPERATIONS, validate_fields
+from .profiles import DEFAULT_PERMISSIONS, PERMISSION_OPERATIONS, SUPERVISOR_ID, normalize, supervisor_permissions
+from .runs import agent_run, mark_interrupted
 
 
 class ChatError(Exception):
     def __init__(self, message, status=502):
         super().__init__(message)
         self.status = status
-
-
-SUPERVISOR_ID = "tripsci-supervisor"
-SUPERVISOR = Path(__file__).parent / "agents" / "supervisor" / "AGENTS.md"
-
-def supervisor_definition(config=None):
-    return {
-        "id": SUPERVISOR_ID, "name": "TripSci 研发主管", "role": "supervisor",
-        "runtime": "codex", "instructions": SUPERVISOR.read_text(encoding="utf-8"),
-        "skills": [], "version": 1, "managed": True,
-        "permissions": supervisor_permissions(config),
-    }
-
-OPERATIONS = {
-    "workspace": ("新建项目或编辑项目配置", "id name repo baseline dataset train evaluate mode floor training_host delivery agent_host remote_dir kind primary_metric metric_direction baseline_value seed"),
-    "plan": ("创建研究计划草稿", "title direction workspace"),
-    "start": ("确认并委派研究计划", "id design budget agent baseline strategy research_mode run_mode interval"),
-    "feedback": ("发送 Worker 反馈", "id text"),
-    "pause": ("暂停研究计划", "id"),
-    "resume": ("恢复研究计划", "id"),
-    "skill": ("创建 Skill，可同时分配给主管或 Worker", "name markdown agent"),
-    "agent": ("创建或更新 Worker 配置", "id name instructions runtime skills"),
-    "settings": ("更新工作区执行设置", "delay slots"),
-}
-PERMISSION_OPERATIONS = {
-    "projects": {"workspace"},
-    "research": {"plan", "start", "feedback", "pause", "resume"},
-    "configuration": {"skill", "agent", "settings"},
-}
-DEFAULT_PERMISSIONS = dict.fromkeys(("web_search", *PERMISSION_OPERATIONS), True)
-
-
-def supervisor_permissions(config):
-    return {**DEFAULT_PERMISSIONS, **(config or {}).get("permissions", {})}
 
 
 def allowed_operations(permissions):
@@ -98,6 +65,7 @@ class MainChat:
 
     def recover_turns(self):
         with self.project.tx() as db:
+            mark_interrupted(self.project, db, purpose="conversation")
             for turn in self.project.all(db, "chat_turn"):
                 if turn["status"] == "running":
                     saved = self.project.get(db, "request", turn["id"])
@@ -140,21 +108,18 @@ class MainChat:
         with self.project.tx() as db:
             self.project.put(db, "chat_turn", key, {"id":key, "request":request, **outcome})
 
-    def reply(self, request, legacy=False, progress=None):
+    def reply(self, request, progress=None):
         key = request.get("request_key")
         if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{16,100}", key)):
             raise ValueError("Invalid request key.")
-        text = request.get("message" if legacy else "text")
+        text = request.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("消息须为 1–4000 字。")
         text = text.strip()
         plan_id = request.get("plan") or ""
         thread_id = request.get("thread") or ""
-        task_id = request.get("task") if legacy else ""
-        if any(not isinstance(value, str) for value in (plan_id,thread_id,task_id or "")) or (plan_id and thread_id):
+        if any(not isinstance(value, str) for value in (plan_id, thread_id)) or (plan_id and thread_id):
             raise ValueError("无效的会话引用。")
-        if legacy and task_id:
-            thread_id = "legacy-" + task_id
         kind = "plan" if plan_id else "thread"
         identifier = plan_id or thread_id or (hashlib.sha256(key.encode()).hexdigest()[:24] if key else uuid.uuid4().hex[:24])
         digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
@@ -177,32 +142,30 @@ class MainChat:
                 if row and self.project.archived(db, kind, row):
                     raise ValueError("此研究计划已删除。")
                 if not row:
-                    if plan_id or (thread_id and not legacy):
+                    if plan_id or thread_id:
                         raise ValueError("找不到此会话。")
                     row = {"id": identifier, "title": text[:30], "messages": []}
-                context = self.context(db, row, kind, task_id, text)
-            response = codex_chat(context, progress) if self.model is codex_chat else self.model(context)
-            if not isinstance(response,dict) or not isinstance(response.get("reply"),str) or not response["reply"].strip():
-                raise ChatError("模型返回了空回复。")
-            reply = response["reply"]
-            proposal = self.proposal(response.get("proposal"),context) if not legacy else None
+                profile = normalize(self.project.get(db, "agent", SUPERVISOR_ID))
+                context = self.context(db, row, kind, text, profile)
+            with agent_run(self.project, profile, "conversation", **{kind: identifier}) as run_id:
+                response = codex_chat(context, progress) if self.model is codex_chat else self.model(context)
+                if not isinstance(response, dict) or not isinstance(response.get("reply"), str) or not response["reply"].strip():
+                    raise ChatError("模型返回了空回复。")
+                reply = response["reply"]
+                proposal = self.proposal(response.get("proposal"), context)
             with self.project.tx() as db:
                 latest = self.project.get(db, kind, identifier) or row
-                message = {"role":"agent","text":reply.strip(),"source":"llm","agent":SUPERVISOR_ID}
+                message = {"role":"agent","text":reply.strip(),"source":"llm","agent":SUPERVISOR_ID,"agent_run":run_id}
                 if proposal:
                     permissions = self.permissions(db)
                     if proposal["operation"] not in allowed_operations(permissions):
                         raise ChatError("研发主管的这项权限已关闭，请在智能体配置中调整。", 403)
-                    proposal.update(id=uuid.uuid4().hex, status="pending", conversation=identifier, kind=kind)
+                    proposal.update(id=uuid.uuid4().hex, status="pending", conversation=identifier, kind=kind, agent_run=run_id)
                     self.project.put(db,"supervisor_proposal",proposal["id"],proposal)
                     message["proposal"] = proposal
                 latest["messages"].extend([{"role":"user","text":text},message])
                 self.project.put(db, kind, identifier, latest)
-                if legacy:
-                    for role, content in (("user", text), ("main", reply.strip())):
-                        self.project.put(db, "chat", uuid.uuid4().hex,
-                                         {"role":role,"message":content,"task":task_id})
-                result = {"task": task_id, "reply": reply.strip()} if legacy else latest
+                result = latest
                 if key:
                     self.project.put(db, "request", key, {"digest":digest,"result":result})
             return result
@@ -213,11 +176,12 @@ class MainChat:
             return None
         try:
             operation = value["operation"]
-            label, fields = OPERATIONS[operation]
+            label, _ = OPERATIONS[operation]
             payload = json.loads(value["payload_json"])
-            if not isinstance(payload,dict) or not payload or set(payload)-set(fields.split()):
+            if not isinstance(payload, dict) or not payload:
                 raise ValueError("invalid proposal fields")
-            references = {"workspace":"projects","agent":"agents"}
+            validate_fields(operation, payload)
+            references = {"workspace":"projects","agent":"agents","attach_plan":"plans"}
             if operation in ("start","feedback","pause","resume"):
                 references["id"] = "plans"
                 if not payload.get("id"):
@@ -270,11 +234,11 @@ class MainChat:
     def permissions(self, db):
         return supervisor_permissions(self.project.get(db, "agent", SUPERVISOR_ID))
 
-    def context(self, db, row, kind, task_id, text):
-        supervisor = self.project.get(db, "agent", SUPERVISOR_ID)
+    def context(self, db, row, kind, text, supervisor):
+        task_id = None
         context = {"history": [{"role":m["role"],"text":m["text"][:4000]} for m in row["messages"][-16:]],
                    "message": text, "permissions": supervisor_permissions(supervisor),
-                   "supervisor_provider": supervisor["runtime"],
+                   "supervisor_provider": supervisor["provider"],
                    "supervisor_instructions": supervisor["instructions"],
                    "supervisor_skills": supervisor.get("skill_files", [])}
         context["workspace"] = {

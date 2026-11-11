@@ -1,10 +1,10 @@
 """Workspace commands: plans."""
 from .common import uid
-from research.planner import SKILL as SCIENTIFIC_SKILL
-from legacy.benchmarks import beans
+from compat.benchmark_policy import SKILL as SCIENTIFIC_SKILL
+from compat.benchmarks import beans
 import copy
-from legacy.benchmarks import iris
-from legacy.benchmarks import name_llm
+from compat.benchmarks import iris
+from compat.benchmarks import name_llm
 from execution import PROVIDERS
 
 
@@ -166,10 +166,11 @@ def start_local_project(api, db, request, plan, env, agent):
     if agent["runtime"] != "codex" or not PROVIDERS["codex"].detect():
         raise ValueError("请选择可用的 Codex Worker。")
     goal = api.string(request, "design") or plan["direction"]
-    key = api.manager.create(db, goal, request.get("budget"))
-    task = api.get(db, "task", key)
     primary = env["primary_metric"]
     baseline = {primary: env["baseline_value"]}
+    constraints = {"primary_metric": primary, "dataset": env["dataset"]}
+    key = api.manager.create(db, goal, request.get("budget"), constraints=constraints, baseline=baseline)
+    task = api.get(db, "task", key)
     task.update(research_mode="agent", workspace=env["id"], plan=plan["id"],
                 environment=copy.deepcopy(env), agent=copy.deepcopy(agent),
                 baseline=env["baseline"], baseline_metrics=baseline, best=dict(baseline),

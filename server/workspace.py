@@ -1,17 +1,10 @@
 """Versioned application operations shared by the native client and tests."""
-from actions import ACTIONS
+from commands import ACTIONS, validate_fields
 from pathlib import Path
 from execution import runtimes
-from main_chat import SUPERVISOR_ID, supervisor_definition
-from run_workspace import write_json, write_text
+from agents.profiles import DEFAULT_WORKER, SUPERVISOR_ID, normalize, supervisor_definition
+from run_artifacts import write_json, write_text
 
-
-
-DEFAULT_AGENT = {
-    "id": "worker", "name": "研究 Worker", "runtime": "local-process",
-    "instructions": "比较模拟 CTR 平滑策略；遵守计划护栏。",
-    "skills": ["adaptive-ctr"], "version": 1,
-}
 
 class WorkspaceAPI:
     def __init__(self, project, manager):
@@ -27,15 +20,19 @@ class WorkspaceAPI:
                 if supervisor["instructions"] != instructions:
                     self.save_agent(db, dict(supervisor, instructions=instructions, version=supervisor["version"] + 1))
             if not self.p.get(db, "agent", "worker"):
-                self.save_agent(db, DEFAULT_AGENT)
+                self.save_agent(db, DEFAULT_WORKER)
+            for agent in self.p.all(db, "agent"):
+                if agent != normalize(agent) or not self.p.get(db, "agent_profile_version", f'{agent["id"]}:{agent["version"]}'):
+                    self.save_agent(db, agent)
 
     def save_agent(self, db, agent):
-        row = dict(agent)
+        row = normalize(agent)
         directory = self.p.root / "agents" / row["id"] / f'v{row["version"]}'
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "AGENTS.md"
         write_text(path, row["instructions"] + "\n")
         row["instructions_path"] = str(path.relative_to(self.p.root))
+        self.p.put(db, "agent_profile_version", f'{row["id"]}:{row["version"]}', row)
         return self.put(db, "agent", row)
 
     def save_project_config(self, db, config):
@@ -107,4 +104,7 @@ class WorkspaceAPI:
         handler = ACTIONS.get(op) if isinstance(op, str) else None
         if handler is None:
             raise ValueError("未知操作。")
+        ignored = {"op", "managed_dir", "config_path"} if op == "workspace" else {"op"}
+        payload = {key: value for key, value in d.items() if key not in ignored}
+        validate_fields(op, payload)
         return handler(self, db, d)

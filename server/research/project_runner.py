@@ -2,11 +2,13 @@
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
+
+from execution.isolation import run_isolated
 
 
 def git(root, *args):
@@ -65,30 +67,42 @@ def clone(source, target, revision):
     git(target, "checkout", "--quiet", "--detach", revision)
 
 
+def valid_metrics(metrics, primary):
+    return (isinstance(metrics, dict) and primary in metrics
+            and all(type(value) in (float, int) and math.isfinite(value) for value in metrics.values()))
+
+
 def read_metrics(path, primary):
     metrics = json.loads(path.read_text())
-    if (not isinstance(metrics, dict) or primary not in metrics or
-            any(type(value) not in (float, int) or not math.isfinite(value) for value in metrics.values())):
+    if not valid_metrics(metrics, primary):
         raise ValueError("评测输出须为指标名到有限数字的 JSON 对象，并包含主指标。")
     return metrics
 
 
-def evaluate(env, checkout, attempt, evaluator):
-    attempt.mkdir(parents=True, exist_ok=True)
-    if fingerprint(env["dataset"]) != env["data_sha256"]:
+def evaluate(env, checkout, attempt, evaluator, *, lock_fd):
+    # Both stages see the same immutable data snapshot. Only the evaluator can write metrics.
+    dataset = attempt / "data" / Path(env["dataset"]).name
+    dataset.parent.mkdir()
+    shutil.copyfile(env["dataset"], dataset)
+    if fingerprint(dataset) != env["data_sha256"]:
         raise ValueError("数据已与计划快照不符。请检查项目配置。")
-    metrics_path = attempt / "metrics.json"
-    metrics_path.unlink(missing_ok=True)
-    environ = dict(os.environ, TRIPSCI_DATASET=env["dataset"], TRIPSCI_SEED=str(env["seed"]),
-                   TRIPSCI_RUN_DIR=str(attempt),
-                   TRIPSCI_CANDIDATE_DIR=str(checkout))
-    for stage in ("train", "evaluate"):
+    artifacts = attempt / "artifacts"
+    artifacts.mkdir()
+    outputs = attempt / "metrics"
+    outputs.mkdir()
+    metrics_path = outputs / "metrics.json"
+    for stage, cwd in (("train", checkout), ("evaluate", evaluator)):
+        private = attempt / (stage + "-home")
+        private.mkdir()
+        environ = {
+            "TRIPSCI_DATASET": str(dataset), "TRIPSCI_SEED": str(env["seed"]),
+            "TRIPSCI_RUN_DIR": str(artifacts), "TRIPSCI_CANDIDATE_DIR": str(checkout),
+        }
         if stage == "evaluate":
-            metrics_path.unlink(missing_ok=True)
             environ["TRIPSCI_METRICS_PATH"] = str(metrics_path)
+        reads = (dataset, checkout, artifacts) if stage == "evaluate" else (dataset,)
+        writes = (outputs,) if stage == "evaluate" else (checkout, artifacts)
         with (attempt / (stage + ".log")).open("wb") as log:
-            subprocess.run(env["commands"][stage], cwd=checkout if stage == "train" else evaluator, env=environ, stdin=subprocess.DEVNULL,
-                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=600)
-    if fingerprint(env["dataset"]) != env["data_sha256"]:
-        raise ValueError("训练或评测期间数据发生变化。")
+            run_isolated(env["commands"][stage], cwd=cwd, home=private, read=reads,
+                         write=writes, env=environ, log=log, lock_fd=lock_fd)
     return read_metrics(metrics_path, env["primary_metric"])
