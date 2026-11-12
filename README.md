@@ -45,6 +45,8 @@ python3 scripts/run-name-llm.py --url http://127.0.0.1:8776 --output /tmp/tripsc
 
 导入器按文件哈希锁定数据；原文保存在服务状态目录，项目 Git 仅记录协议和候选配置。脚本并行启动字符 n-gram（4 轮）、文体与标点（4 轮）和按验证结果自适应搜索（20 轮）。按 `prompt_id` 分组切训练、验证和本地保留测试，主指标为 Balanced Accuracy。它不提交 Kaggle，保留测试分数也不是榜单成绩。
 
+真实 Codex 自主探索实测见 [Name That LLM 运行报告](docs/research-runs/2026-11-11-name-that-llm/README.md)。
+
 ### 浏览本机研究文件
 
 `python3 scripts/export-workspace.py` 将当前 Web 工作区导出到仓库根目录的 `workspace-data/`。打开其中的 `README.md` 可以找到智能体指令、自定义 Skills、项目和计划配置、逐轮实验数据，以及原始 Git 工作区和报告链接。导出目录被 Git 忽略。

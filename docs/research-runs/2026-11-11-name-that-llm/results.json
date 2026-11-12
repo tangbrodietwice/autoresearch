@@ -1,0 +1,276 @@
+{
+  "framework_commit": "c85f14f9a657799b6ed3bd1965e0d9d6e1c1c951",
+  "upstream": {
+    "source_repo": "https://github.com/RohanExploit/kaggle-name-that-llm-top20",
+    "source_revision": "753ca9d78a5540cb2c8e557390b0a610b07e217e"
+  },
+  "dataset": {
+    "sha256": "40a22ce8d88c5f46feb4637a099db815bef5f713ffe53e89dbe1b7b21de77707",
+    "rows": 2699,
+    "prompts": 150,
+    "labels": 18,
+    "fixture": false,
+    "split_group": "prompt_id",
+    "split_seed": 173,
+    "split_counts": {
+      "validation": 539,
+      "holdout": 540,
+      "train": 1620
+    }
+  },
+  "plan": {
+    "id": "fadd5c99008f",
+    "task_id": "d09f57732a81",
+    "title": "自由探索 · 文本表示与分类器",
+    "objective": "在固定的 prompt_id 分组验证集上，自主探索对 18 类文本归因有帮助的表示和分类器。由 Worker 根据证据选择假设和候选，不预排实验矩阵；优先比较词频、字符片段和文体信号的互补性，允许根据结果调整方向。主指标 Balanced Accuracy，同时遵守 Accuracy 护栏；结合类别召回解释每次取舍。使用固定基线、划分和数据版本，保留集只在计划结束后评审一次。报告可复现的配置、验证证据、失败假设和局限。",
+    "mode": "codex",
+    "requested_budget": 20,
+    "effective_budget": 10,
+    "status": "completed",
+    "holdout_evaluated": false
+  },
+  "budget_rejection": {
+    "op": "start",
+    "status": 400,
+    "error": "预算必须为 1–10 轮。",
+    "budget": 20
+  },
+  "baseline": {
+    "balanced_accuracy": 0.255619,
+    "accuracy": 0.25603
+  },
+  "accuracy_floor": 0.24603,
+  "best_round": 5,
+  "rounds": [
+    {
+      "round": 1,
+      "id": "d09f57732a81-1",
+      "config": {
+        "word": 0.5,
+        "char": 0.5,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.257471,
+        "accuracy": 0.257885
+      },
+      "baseline_delta": 0.001852,
+      "guardrail_passed": true,
+      "accepted": true,
+      "revision": "dca00b80de67b03828a46ed9aa0d9dd3b44b9f2c",
+      "report_commit": "9d73acf8d653bca51488c895194d1cdca91dd6ac",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.671
+    },
+    {
+      "round": 2,
+      "id": "d09f57732a81-2",
+      "config": {
+        "word": 0.5,
+        "char": 0.5,
+        "style": 0.1,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.25198,
+        "accuracy": 0.252319
+      },
+      "baseline_delta": -0.003639,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "287414b77b5729f1074f549f07b0f51a32599417",
+      "report_commit": "3e5aeea8133320e03536dac1380b656eeb5c7c3c",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.758
+    },
+    {
+      "round": 3,
+      "id": "d09f57732a81-3",
+      "config": {
+        "word": 0.5,
+        "char": 0,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.255619,
+        "accuracy": 0.25603
+      },
+      "baseline_delta": 0.0,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "9244fe999d7e8ae2bd36383190aa8eb9b2f97b60",
+      "report_commit": "6a244666120294b4aa46516ab5d88081b9052a89",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.148
+    },
+    {
+      "round": 4,
+      "id": "d09f57732a81-4",
+      "config": {
+        "word": 0,
+        "char": 0.5,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.246616,
+        "accuracy": 0.246753
+      },
+      "baseline_delta": -0.009003,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "dcc5d473796c39df5725c66379927b274d132334",
+      "report_commit": "c18375c9c9c1396d25d5c486c34208ef682bfe2e",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.556
+    },
+    {
+      "round": 5,
+      "id": "d09f57732a81-5",
+      "config": {
+        "word": 0.5,
+        "char": 0.25,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.264943,
+        "accuracy": 0.265306
+      },
+      "baseline_delta": 0.009324,
+      "guardrail_passed": true,
+      "accepted": true,
+      "revision": "739e9fa62c1b72787abe5e9f2d7a6e8ed5f7bc58",
+      "report_commit": "1abc7062da06207f2adfff684f78e628e80c62ef",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.649
+    },
+    {
+      "round": 6,
+      "id": "d09f57732a81-6",
+      "config": {
+        "word": 0.5,
+        "char": 0.25,
+        "style": 0.1,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.263155,
+        "accuracy": 0.263451
+      },
+      "baseline_delta": 0.007536,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "c3c19d8a1eac96c84868804a5317c9f895dd848b",
+      "report_commit": "d3e4f2da0ed8aafb82456f3e33c978b24f827882",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.753
+    },
+    {
+      "round": 7,
+      "id": "d09f57732a81-7",
+      "config": {
+        "word": 0.5,
+        "char": 0.25,
+        "style": 0,
+        "grams": 4,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.253831,
+        "accuracy": 0.254174
+      },
+      "baseline_delta": -0.001788,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "3316b370040aeed507c755f2f1102b4b357b8715",
+      "report_commit": "097504920644b6f80981867483ff1732505bb562",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.909
+    },
+    {
+      "round": 8,
+      "id": "d09f57732a81-8",
+      "config": {
+        "word": 0.5,
+        "char": 0.25,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "multinomial_nb"
+      },
+      "result": {
+        "balanced_accuracy": 0.248212,
+        "accuracy": 0.248609
+      },
+      "baseline_delta": -0.007407,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "55233285c77ad97955bb4d8b55d33f53a0b69071",
+      "report_commit": "a9731897676669633a2ecec7cb8a0247247302d3",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.676
+    },
+    {
+      "round": 9,
+      "id": "d09f57732a81-9",
+      "config": {
+        "word": 0.5,
+        "char": 0.125,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.263091,
+        "accuracy": 0.263451
+      },
+      "baseline_delta": 0.007472,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "e7405ce46ad15b40af9f33c81747ebe867ab18b0",
+      "report_commit": "b4310a36ee30e9d00268989cbae9ee37a940aad6",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.643
+    },
+    {
+      "round": 10,
+      "id": "d09f57732a81-10",
+      "config": {
+        "word": 0.5,
+        "char": 0.375,
+        "style": 0,
+        "grams": 3,
+        "normalize": true,
+        "classifier": "centroid"
+      },
+      "result": {
+        "balanced_accuracy": 0.264879,
+        "accuracy": 0.265306
+      },
+      "baseline_delta": 0.00926,
+      "guardrail_passed": true,
+      "accepted": false,
+      "revision": "7ef0fffa51ffa566c184a608662aa8c00ce2f093",
+      "report_commit": "4ecc3b1a519b632310a2f689a680663827a63056",
+      "attempt_count": 1,
+      "training_and_validation_seconds": 0.645
+    }
+  ]
+}
